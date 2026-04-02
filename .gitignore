@@ -1,0 +1,5 @@
+.env
+.kite_session.json
+paper_trades.csv
+__pycache__/
+*.pyc
