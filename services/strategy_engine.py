@@ -32,7 +32,7 @@ from services.order_service import (
 )
 from services.risk_manager import (
     can_enter_trade, check_exit_conditions, calculate_pnl,
-    MAX_TRADES_PER_DAY,
+    compute_dynamic_sl, MAX_TRADES_PER_DAY,
 )
 from services.paper_trade import log_trade
 from services.market_data import MarketDataService
@@ -475,6 +475,22 @@ class TradingEngine:
                     instrument["tradingsymbol"], avg_price, order_id
                 )
 
+            # Compute dynamic SL from candle structure
+            option_type = signal.value[-2:]   # "CE" or "PE"
+            sl_result = compute_dynamic_sl(
+                candles=state.candles,
+                option_type=option_type,
+                nifty_spot=state.nifty_spot,
+                entry_price=avg_price,
+            )
+            if sl_result is None:
+                # Candle structure too wide — skip this trade
+                logger.info("Trade skipped — dynamic SL too wide for current candle structure")
+                with get_lock():
+                    get_raw_state().trades_today -= 1  # rollback slot
+                return
+            sl_price, sl_pct = sl_result
+
             # Compute efficiency ratio for logging
             candles_snap = state.candles
             eff = 0.0
@@ -490,7 +506,7 @@ class TradingEngine:
             position = PositionInfo(
                 option_symbol=instrument["tradingsymbol"],
                 instrument_token=instrument["instrument_token"],
-                option_type=signal.value[-2:],
+                option_type=option_type,
                 strike=int(instrument["strike"]),
                 expiry=instrument["expiry"],
                 entry_price=avg_price,
@@ -499,7 +515,7 @@ class TradingEngine:
                 entry_time=datetime.now(IST),
                 reason_for_entry=reason,
                 current_price=avg_price,
-                trailing_sl_price=avg_price * (1 - 20.0 / 100),   # initial hard SL (matches STOPLOSS_PCT)
+                trailing_sl_price=sl_price,      # dynamic structure-based SL
                 highest_price_seen=avg_price,
                 # Indicator snapshot
                 nifty_spot_entry=state.nifty_spot,
@@ -508,6 +524,10 @@ class TradingEngine:
                 rsi14_entry=indicators.get("rsi14") or 0.0,
                 market_state_entry=indicators.get("market_state", "UNKNOWN"),
                 efficiency_entry=eff,
+            )
+            logger.info(
+                "ENTRY CONFIRMED | %s | entry=%.2f sl=%.2f (%.1f%%) | %s",
+                instrument["tradingsymbol"], avg_price, sl_price, sl_pct, reason,
             )
 
             update_state(position=position)
