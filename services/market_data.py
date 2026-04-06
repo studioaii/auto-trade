@@ -290,11 +290,10 @@ class MarketDataService:
             elif token == self._nifty_futures_token:
                 # Build candles from futures (real volume + OI)
                 self._process_candle_tick(tick, ltp)
-
-                # Also update spot from futures if index hasn't sent one yet
-                # (futures track index closely, <5 pts difference)
-                if self._spot_callback and ltp > 0:
-                    self._spot_callback(ltp)
+                # Track futures LTP separately for UI comparison — do NOT use as spot
+                if ltp > 0:
+                    from services.trading_state import update_state
+                    update_state(nifty_futures_ltp=ltp)
 
             elif token in self._option_tokens:
                 # Option LTP update for P&L monitoring

@@ -348,6 +348,7 @@ class TradingEngine:
             "trades_today":    state.trades_today,
             "max_trades":      MAX_TRADES_PER_DAY,
             "nifty_spot":      round(state.nifty_spot, 2),
+            "nifty_futures_ltp": round(state.nifty_futures_ltp, 2),
             "ce_ltp":          round(state.ce_ltp, 2),
             "pe_ltp":          round(state.pe_ltp, 2),
             "market_state":    state.market_state,

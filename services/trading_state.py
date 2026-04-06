@@ -53,6 +53,7 @@ class TradingState:
     position: Optional[PositionInfo] = None
     candles: list = field(default_factory=list)   # List[Candle]
     nifty_spot: float = 0.0
+    nifty_futures_ltp: float = 0.0      # live Nifty futures price (for comparison)
     ce_ltp: float = 0.0                 # live ATM CE price
     pe_ltp: float = 0.0                 # live ATM PE price
     last_signal: str = "NO_SIGNAL"

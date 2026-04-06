@@ -185,7 +185,8 @@ def root():
 
   <!-- live stats grid -->
   <div class="live-grid" id="live-grid" style="display:none">
-    <div class="li"><div class="lbl">Nifty Spot</div><div class="val" id="nifty-spot">—</div></div>
+    <div class="li"><div class="lbl">Nifty Spot (Index)</div><div class="val" id="nifty-spot">—</div></div>
+    <div class="li"><div class="lbl">Nifty Futures</div><div class="val" id="nifty-futures">—</div></div>
     <div class="li"><div class="lbl">ATM CE LTP</div><div class="val" id="ce-ltp">—</div><div class="lbl" id="ce-sym" style="margin-top:3px;color:#0369a1;font-size:10px;font-weight:700">—</div></div>
     <div class="li"><div class="lbl">ATM PE LTP</div><div class="val" id="pe-ltp">—</div><div class="lbl" id="pe-sym" style="margin-top:3px;color:#9d174d;font-size:10px;font-weight:700">—</div></div>
     <div class="li"><div class="lbl">Last Signal</div><div class="val" id="last-signal">—</div></div>
@@ -524,7 +525,8 @@ function updateEngineUI(d) {
   const liveGrid = document.getElementById('live-grid');
   if(d.engine_running || d.nifty_spot>0) {
     liveGrid.style.display='grid';
-    document.getElementById('nifty-spot').textContent  = d.nifty_spot>0 ? d.nifty_spot.toFixed(1) : '—';
+    document.getElementById('nifty-spot').textContent    = d.nifty_spot>0 ? d.nifty_spot.toFixed(1) : '—';
+    document.getElementById('nifty-futures').textContent = d.nifty_futures_ltp>0 ? d.nifty_futures_ltp.toFixed(1) : '—';
     document.getElementById('ce-ltp').textContent      = d.ce_ltp>0 ? '₹'+d.ce_ltp.toFixed(2) : '—';
     document.getElementById('pe-ltp').textContent      = d.pe_ltp>0 ? '₹'+d.pe_ltp.toFixed(2) : '—';
     document.getElementById('last-signal').textContent = d.last_signal||'—';
