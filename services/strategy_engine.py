@@ -128,54 +128,66 @@ class TradingEngine:
 
             all_candles = today_candles
 
-            # Prepend yesterday's candles when today doesn't have enough for EMA/RSI
+            # Prepend previous trading day's candles when today doesn't have enough for EMA/RSI
             if len(today_candles) < MIN_CANDLES:
                 seed_count = MIN_CANDLES - len(today_candles) + 5  # small buffer
 
-                # Walk back to the last weekday (skip weekends)
+                # Walk back to the last actual trading day (skip weekends + public holidays)
+                # Try up to 10 days back to handle long holiday stretches
                 prev_day = today - timedelta(days=1)
-                while prev_day.weekday() >= 5:   # 5=Sat, 6=Sun
-                    prev_day -= timedelta(days=1)
+                seed_candles: list[Candle] = []
 
-                prev_start = datetime(prev_day.year, prev_day.month, prev_day.day, 9, 15, 0, tzinfo=IST)
-                prev_end   = datetime(prev_day.year, prev_day.month, prev_day.day, 15, 30, 0, tzinfo=IST)
+                for _ in range(10):
+                    # Skip weekends first
+                    while prev_day.weekday() >= 5:
+                        prev_day -= timedelta(days=1)
 
-                logger.info(
-                    "Fetching seed candles from %s for EMA/RSI warmup (need ~%d)",
-                    prev_day, seed_count,
-                )
+                    prev_start = datetime(prev_day.year, prev_day.month, prev_day.day, 9, 15, 0, tzinfo=IST)
+                    prev_end   = datetime(prev_day.year, prev_day.month, prev_day.day, 15, 30, 0, tzinfo=IST)
 
-                try:
-                    raw_prev = self._kite.historical_data(
-                        instrument_token=candle_token,
-                        from_date=prev_start,
-                        to_date=prev_end,
-                        interval="5minute",
-                    )
-
-                    prev_candles: list[Candle] = []
-                    for row in raw_prev:
-                        ts = row["date"]
-                        if hasattr(ts, "astimezone"):
-                            ts = ts.astimezone(IST)
-                        prev_candles.append(Candle(
-                            timestamp=ts,
-                            open=row["open"],
-                            high=row["high"],
-                            low=row["low"],
-                            close=row["close"],
-                            volume=row.get("volume", 0),
-                        ))
-
-                    seed_candles = prev_candles[-seed_count:] if prev_candles else []
-                    all_candles = seed_candles + today_candles
                     logger.info(
-                        "Seed from %s: %d candles | Combined total: %d",
-                        prev_day, len(seed_candles), len(all_candles),
+                        "Fetching seed candles from %s for EMA/RSI warmup (need ~%d)",
+                        prev_day, seed_count,
                     )
-                except Exception as e:
-                    logger.warning("Seed candle fetch failed (%s) — using today only", e)
-                    all_candles = today_candles
+
+                    try:
+                        raw_prev = self._kite.historical_data(
+                            instrument_token=candle_token,
+                            from_date=prev_start,
+                            to_date=prev_end,
+                            interval="5minute",
+                        )
+
+                        prev_candles: list[Candle] = []
+                        for row in raw_prev:
+                            ts = row["date"]
+                            if hasattr(ts, "astimezone"):
+                                ts = ts.astimezone(IST)
+                            prev_candles.append(Candle(
+                                timestamp=ts,
+                                open=row["open"],
+                                high=row["high"],
+                                low=row["low"],
+                                close=row["close"],
+                                volume=row.get("volume", 0),
+                            ))
+
+                        if prev_candles:
+                            seed_candles = prev_candles[-seed_count:]
+                            logger.info(
+                                "Seed from %s: %d candles | Combined total: %d",
+                                prev_day, len(seed_candles), len(seed_candles) + len(today_candles),
+                            )
+                            break  # Found a trading day with data — stop looking
+                        else:
+                            logger.info("%s had no candles (holiday?) — trying previous day", prev_day)
+                            prev_day -= timedelta(days=1)
+
+                    except Exception as e:
+                        logger.warning("Seed candle fetch failed for %s (%s) — trying previous day", prev_day, e)
+                        prev_day -= timedelta(days=1)
+
+                all_candles = seed_candles + today_candles
 
             if not all_candles:
                 logger.info("No historical candles available to preload")
