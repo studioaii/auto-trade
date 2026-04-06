@@ -359,6 +359,62 @@ class TradingEngine:
     # WebSocket callbacks
     # ------------------------------------------------------------------
 
+    def _recalculate_atm(self) -> None:
+        """
+        Called on every 5-min candle close.
+        If Nifty has moved enough to shift the ATM strike, swap CE/PE instruments
+        and update WebSocket subscriptions. Skipped when a position is open.
+        """
+        state = get_state()
+        if state.position is not None:
+            return  # Never change instruments mid-trade
+
+        if state.nifty_spot <= 0 or not self._ce_instrument:
+            return
+
+        new_atm = get_atm_strike(state.nifty_spot)
+        current_atm = int(self._ce_instrument["strike"])
+
+        if new_atm == current_atm:
+            return  # Strike unchanged
+
+        logger.info(
+            "ATM shift detected | %s → %s | spot=%.1f",
+            current_atm, new_atm, state.nifty_spot,
+        )
+
+        try:
+            expiry = get_current_expiry(self._instruments)
+            new_ce = find_option_instrument(self._instruments, expiry, new_atm, "CE")
+            new_pe = find_option_instrument(self._instruments, expiry, new_atm, "PE")
+        except ValueError as e:
+            logger.warning("ATM reselection failed — keeping old strike: %s", e)
+            return
+
+        old_tokens = [
+            self._ce_instrument["instrument_token"],
+            self._pe_instrument["instrument_token"],
+        ]
+        new_tokens = [
+            new_ce["instrument_token"],
+            new_pe["instrument_token"],
+        ]
+
+        self._ce_instrument = new_ce
+        self._pe_instrument = new_pe
+
+        self._market_data.swap_option_subscriptions(old_tokens, new_tokens)
+
+        with get_lock():
+            raw = get_raw_state()
+            raw.ce_ltp = 0.0
+            raw.pe_ltp = 0.0
+
+        logger.info(
+            "ATM updated | strike=%s | CE=%s PE=%s",
+            new_atm, new_ce["tradingsymbol"], new_pe["tradingsymbol"],
+        )
+
     def _on_spot_update(self, spot: float) -> None:
         update_state(nifty_spot=spot)
 
@@ -379,6 +435,9 @@ class TradingEngine:
         with get_lock():
             get_raw_state().candles.append(candle)
             get_raw_state().last_candle_time = candle.timestamp
+
+        # Recalculate ATM on every candle — skipped if position is open
+        self._recalculate_atm()
 
         state = get_state()
 

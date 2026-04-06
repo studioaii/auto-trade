@@ -151,6 +151,26 @@ class MarketDataService:
         except Exception as e:
             logger.error("Failed to subscribe to tokens: %s", e)
 
+    def swap_option_subscriptions(self, old_tokens: list[int], new_tokens: list[int]) -> None:
+        """Unsubscribe old option tokens and subscribe new ones (ATM shift)."""
+        if not self._ticker:
+            return
+        try:
+            if old_tokens:
+                self._ticker.unsubscribe(old_tokens)
+            with self._lock:
+                for t in old_tokens:
+                    if t in self._option_tokens:
+                        self._option_tokens.remove(t)
+                for t in new_tokens:
+                    if t not in self._option_tokens:
+                        self._option_tokens.append(t)
+            self._ticker.subscribe(new_tokens)
+            self._ticker.set_mode(self._ticker.MODE_LTP, new_tokens)
+            logger.info("ATM swap | unsubscribed=%s subscribed=%s", old_tokens, new_tokens)
+        except Exception as e:
+            logger.error("Failed to swap option subscriptions: %s", e)
+
     # ------------------------------------------------------------------
     # KiteTicker callbacks
     # ------------------------------------------------------------------
