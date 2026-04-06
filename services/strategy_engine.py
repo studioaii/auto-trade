@@ -35,6 +35,7 @@ from services.risk_manager import (
     compute_dynamic_sl, MAX_TRADES_PER_DAY,
 )
 from services.paper_trade import log_trade
+from services.candle_logger import log_candle
 from services.market_data import MarketDataService
 
 logger = logging.getLogger(__name__)
@@ -473,9 +474,40 @@ class TradingEngine:
 
         state = get_state()
 
-        # Skip if position is open (exit logic is in monitoring loop)
+        # Always compute indicators — needed for both logging and trading
+        indicators = get_latest_indicators(state.candles)
+        if indicators.get("enough_data"):
+            update_state(market_state=indicators["market_state"])
+
+        # Determine signal (only when trading is eligible — logged regardless)
+        signal = Signal.NO_SIGNAL
+        reason = ""
+        trading_eligible = (
+            state.position is None
+            and state.trades_today < MAX_TRADES_PER_DAY
+            and is_market_open_and_ready()
+            and indicators.get("enough_data", False)
+            and indicators.get("market_state") != "SIDEWAYS"
+        )
+        if trading_eligible:
+            signal, reason = generate_signal(
+                state.candles,
+                indicators["vwap"],
+                indicators["ema20"],
+                indicators["ema20_series"],
+                indicators["market_state"],
+                rsi14=indicators.get("rsi14"),
+                volume_surge=indicators.get("volume_surge", True),
+            )
+            update_state(last_signal=signal.value)
+
+        # Log every candle with full indicator + signal snapshot
+        atm_strike = int(self._ce_instrument["strike"]) if self._ce_instrument else None
+        log_candle(candle, indicators, signal.value, state, atm_strike)
+
+        # ── Trading decisions ──────────────────────────────────────────
         if state.position is not None:
-            return
+            return  # exit logic handled by monitoring loop
 
         if state.trades_today >= MAX_TRADES_PER_DAY:
             return
@@ -483,31 +515,16 @@ class TradingEngine:
         if not is_market_open_and_ready():
             return
 
-        # Compute indicators
-        indicators = get_latest_indicators(state.candles)
-        update_state(market_state=indicators["market_state"])
-
-        if not indicators["enough_data"]:
+        if not indicators.get("enough_data", False):
             logger.info(
                 "Warming up | candles=%d/%d",
-                indicators["candle_count"], indicators["candles_needed"]
+                indicators["candle_count"], indicators["candles_needed"],
             )
             return
 
-        if indicators["market_state"] == "SIDEWAYS":
+        if indicators.get("market_state") == "SIDEWAYS":
             logger.info("SIDEWAYS market detected — no trades")
             return
-
-        signal, reason = generate_signal(
-            state.candles,
-            indicators["vwap"],
-            indicators["ema20"],
-            indicators["ema20_series"],
-            indicators["market_state"],
-            rsi14=indicators.get("rsi14"),
-            volume_surge=indicators.get("volume_surge", True),
-        )
-        update_state(last_signal=signal.value)
 
         if signal == Signal.NO_SIGNAL:
             return

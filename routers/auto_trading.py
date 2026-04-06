@@ -8,6 +8,7 @@ from services.kite_service import require_authenticated_client
 from services.trading_state import get_state
 from services.strategy_engine import get_engine
 from services.paper_trade import read_trades, get_summary, CSV_PATH
+from services.candle_logger import list_log_files, LOG_DIR
 import os
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,21 @@ async def get_candles():
         })
 
     return {"candles": result}
+
+
+@router.get("/candle-log/list")
+async def list_candle_logs():
+    """List all available daily candle log CSV files."""
+    return {"files": list_log_files()}
+
+
+@router.get("/candle-log/download/{date}")
+async def download_candle_log(date: str):
+    """Download candle log CSV for a specific date (YYYY-MM-DD)."""
+    path = os.path.join(LOG_DIR, f"candles_{date}.csv")
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail=f"No candle log for {date}")
+    return FileResponse(path=path, media_type="text/csv", filename=f"candles_{date}.csv")
 
 
 @router.get("/paper-log/download")
