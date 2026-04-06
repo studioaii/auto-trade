@@ -346,6 +346,18 @@ def root():
     </div>
   </div>
 
+  <!-- CANDLE LOG DOWNLOAD -->
+  <div class="card">
+    <div class="card-title" style="justify-content:space-between">
+      <span>📈 Candle Log</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="date" id="candle-log-date" style="font-size:12px;padding:4px 8px;border:1px solid #ddd;border-radius:4px;background:#fff;color:#333" />
+        <button class="btn s-btn" style="padding:5px 12px;font-size:12px" onclick="downloadCandleLog()">⬇ Download CSV</button>
+      </div>
+    </div>
+    <div style="font-size:12px;color:#aaa">Select a date and download the 5-min candle log with all indicator snapshots.</div>
+  </div>
+
   <!-- BOTTOM LINKS -->
   <div class="grid2">
     <div class="card">
@@ -1017,6 +1029,22 @@ function updateEngineUI(d) {
   } else {
     banner.style.display='none';
   }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CANDLE LOG DOWNLOAD
+══════════════════════════════════════════════════════════════ */
+(function initCandleLogDate() {
+  const today = new Date().toISOString().slice(0, 10);
+  const el = document.getElementById('candle-log-date');
+  if (el) el.value = today;
+})();
+
+function downloadCandleLog() {
+  const el = document.getElementById('candle-log-date');
+  const date = el ? el.value : '';
+  if (!date) { alert('Please select a date.'); return; }
+  window.location.href = '/auto-trading/candle-log/download/' + date;
 }
 
 /* ══════════════════════════════════════════════════════════════
