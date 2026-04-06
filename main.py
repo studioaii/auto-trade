@@ -62,7 +62,6 @@ def root():
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Logesh Auto Trading Engine</title>
-  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{font-family:system-ui,-apple-system,sans-serif;background:#f0f2f5;color:#111;min-height:100vh}
@@ -125,8 +124,8 @@ def root():
     .chart-legend{display:flex;gap:14px;align-items:center;margin-bottom:8px;font-size:11px;flex-wrap:wrap}
     .leg{display:flex;align-items:center;gap:5px;color:#555}
     .leg-line{width:18px;height:3px;border-radius:2px}
-    #chart-container{width:100%;height:380px}
-    #rsi-container{width:100%;height:110px;margin-top:3px}
+    #chart-container{display:block;width:100%;height:380px;cursor:crosshair}
+    #rsi-container{display:block;width:100%;height:110px;margin-top:3px;cursor:crosshair}
     #chart-empty{text-align:center;padding:60px 20px;color:#aaa;font-size:13px;border:2px dashed #e2e8f0;border-radius:10px}
 
     /* ── POSITION BANNER ── */
@@ -294,8 +293,8 @@ def root():
       Start the engine to see live candlestick chart with VWAP &amp; EMA overlays.
     </div>
     <div id="chart-wrap" style="display:none">
-      <div id="chart-container"></div>
-      <div id="rsi-container"></div>
+      <canvas id="chart-container"></canvas>
+      <canvas id="rsi-container"></canvas>
     </div>
   </div>
 
@@ -565,92 +564,302 @@ function switchTab(tab) {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   CHART
+   CANVAS CHART — pure HTML5, no external library
+   Data source: GET /auto-trading/candles (in-memory candles)
 ══════════════════════════════════════════════════════════════ */
-let mainChart = null, rsiChart = null;
-let candleSeries = null, vwapSeries = null, emaSeries = null;
-let rsiSeries = null, rsiObSeries = null, rsiOsSeries = null;
+let chart = null;
 let chartReady = false;
-let syncingRange = false;
+
+function niceStep(range, targetSteps) {
+  const raw = range / targetSteps;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / mag;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag;
+}
+
+function fmtTime(unixSec) {
+  const d = new Date(unixSec * 1000);
+  return d.getUTCHours().toString().padStart(2,'0') + ':' + d.getUTCMinutes().toString().padStart(2,'0');
+}
+
+function rrect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y); ctx.quadraticCurveTo(x+w, y, x+w, y+r);
+  ctx.lineTo(x+w, y+h-r); ctx.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  ctx.lineTo(x+r, y+h); ctx.quadraticCurveTo(x, y+h, x, y+h-r);
+  ctx.lineTo(x, y+r); ctx.quadraticCurveTo(x, y, x+r, y);
+  ctx.closePath();
+}
+
+class CandleChart {
+  constructor(mc, rc) {
+    this.mc = mc; this.rc = rc;
+    this.mctx = mc.getContext('2d');
+    this.rctx = rc.getContext('2d');
+    this.candles = [];
+    this.marker = null;
+    this.hoverIdx = -1;
+
+    mc.addEventListener('mousemove', e => this._hover(e));
+    mc.addEventListener('mouseleave', () => { this.hoverIdx = -1; this._draw(); });
+
+    new ResizeObserver(() => this._resize()).observe(mc.parentElement);
+  }
+
+  _resize() {
+    const w = this.mc.parentElement.clientWidth;
+    if (!w) return;
+    this.mc.width = w; this.mc.style.width = w+'px';
+    this.rc.width = w; this.rc.style.width = w+'px';
+    this._draw();
+  }
+
+  setData(candles, marker) {
+    this.candles = candles;
+    this.marker  = marker;
+    this._resize();
+  }
+
+  _hover(e) {
+    if (!this.candles.length) return;
+    const rect = this.mc.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (this.mc.width / rect.width);
+    const PR = 65, PL = 8;
+    const cw = (this.mc.width - PL - PR) / this.candles.length;
+    const idx = Math.floor((x - PL) / cw);
+    if (idx >= 0 && idx < this.candles.length && idx !== this.hoverIdx) {
+      this.hoverIdx = idx;
+      this._draw();
+    }
+  }
+
+  _draw() { this._drawMain(); this._drawRsi(); }
+
+  _drawMain() {
+    const { mc, mctx: ctx, candles, marker, hoverIdx } = this;
+    const W = mc.width, H = mc.height;
+    if (!W || !H) return;
+    ctx.clearRect(0, 0, W, H);
+    if (!candles.length) return;
+
+    const PL = 8, PR = 65, PT = 16, PB = 28;
+    const chartW = W - PL - PR;
+    const chartH = H - PT - PB;
+    const volH   = Math.max(30, Math.floor(chartH * 0.14));
+    const priceH = chartH - volH - 4;
+
+    const n  = candles.length;
+    const cw = chartW / n;
+    const bw = Math.max(1, Math.floor(cw * 0.6));
+    const toX = i => PL + i * cw + cw / 2;
+
+    // Price range
+    let lo = Infinity, hi = -Infinity;
+    for (const c of candles) {
+      lo = Math.min(lo, c.low);  hi = Math.max(hi, c.high);
+      if (c.vwap  != null) { lo = Math.min(lo, c.vwap);  hi = Math.max(hi, c.vwap);  }
+      if (c.ema20 != null) { lo = Math.min(lo, c.ema20); hi = Math.max(hi, c.ema20); }
+    }
+    const pad = (hi - lo) * 0.06 || 1;
+    lo -= pad; hi += pad;
+    const toY = p => PT + priceH * (1 - (p - lo) / (hi - lo));
+
+    // Volume
+    const maxVol = Math.max(...candles.map(c => c.volume || 0), 1);
+    const volTop = PT + priceH + 4;
+    const toVH   = v => Math.max(1, (v / maxVol) * (volH - 2));
+
+    // Background
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, W, H);
+
+    // Horizontal grid + price axis
+    const step = niceStep(hi - lo, 6);
+    const first = Math.ceil(lo / step) * step;
+    ctx.textAlign = 'left'; ctx.font = '10px system-ui'; ctx.fillStyle = '#94a3b8';
+    for (let p = first; p <= hi + step * 0.1; p += step) {
+      const y = toY(p);
+      if (y < PT - 2 || y > PT + priceH + 2) continue;
+      ctx.strokeStyle = '#f1f5f9'; ctx.lineWidth = 1; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(W - PR, y); ctx.stroke();
+      ctx.fillText(p.toFixed(0), W - PR + 5, y + 3);
+    }
+
+    // Time axis ticks (one label every ~60px)
+    ctx.textAlign = 'center'; ctx.fillStyle = '#94a3b8'; ctx.font = '10px system-ui';
+    const tStep = Math.max(1, Math.round(60 / cw));
+    for (let i = 0; i < n; i += tStep) {
+      ctx.fillText(fmtTime(candles[i].time), toX(i), H - PB + 14);
+    }
+
+    // Volume bars
+    for (let i = 0; i < n; i++) {
+      const c = candles[i];
+      const x = toX(i), vh = toVH(c.volume || 0);
+      ctx.fillStyle = c.close >= c.open ? '#bbf7d0' : '#fecaca';
+      ctx.fillRect(x - bw/2, volTop + volH - vh, bw, vh);
+    }
+
+    // VWAP line
+    ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    ctx.beginPath(); let started = false;
+    for (let i = 0; i < n; i++) {
+      if (candles[i].vwap == null) continue;
+      const x = toX(i), y = toY(candles[i].vwap);
+      started ? ctx.lineTo(x, y) : (ctx.moveTo(x, y), started = true);
+    }
+    ctx.stroke();
+
+    // EMA20 line
+    ctx.strokeStyle = '#0070f3'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); started = false;
+    for (let i = 0; i < n; i++) {
+      if (candles[i].ema20 == null) continue;
+      const x = toX(i), y = toY(candles[i].ema20);
+      started ? ctx.lineTo(x, y) : (ctx.moveTo(x, y), started = true);
+    }
+    ctx.stroke();
+
+    // Candles
+    for (let i = 0; i < n; i++) {
+      const c = candles[i];
+      const x = toX(i);
+      const isUp  = c.close >= c.open;
+      const body  = isUp ? '#22c55e' : '#ef4444';
+      const wick  = isUp ? '#15803d' : '#b91c1c';
+      ctx.strokeStyle = wick; ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, toY(c.high)); ctx.lineTo(x, toY(c.low));
+      ctx.stroke();
+      const bTop = toY(Math.max(c.open, c.close));
+      const bBot = toY(Math.min(c.open, c.close));
+      ctx.fillStyle = body;
+      ctx.fillRect(x - bw/2, bTop, bw, Math.max(1, bBot - bTop));
+    }
+
+    // Entry marker
+    if (marker) {
+      const mi = candles.findIndex(c => c.time === marker.time);
+      if (mi >= 0) {
+        const x = toX(mi);
+        const isCE = marker.type === 'CE';
+        const cy = isCE ? toY(candles[mi].low) + 14 : toY(candles[mi].high) - 14;
+        ctx.fillStyle = isCE ? '#16a34a' : '#dc2626';
+        ctx.font = '13px system-ui'; ctx.textAlign = 'center';
+        ctx.fillText(isCE ? '▲' : '▼', x, cy);
+        ctx.font = 'bold 8px system-ui';
+        ctx.fillText('ENTRY', x, isCE ? cy + 10 : cy - 5);
+      }
+    }
+
+    // Chart border
+    ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.strokeRect(PL, PT, chartW, priceH);
+
+    // Crosshair + tooltip
+    if (hoverIdx >= 0 && hoverIdx < n) {
+      const c = candles[hoverIdx];
+      const x = toX(hoverIdx);
+
+      ctx.strokeStyle = 'rgba(100,116,139,0.4)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, PT + priceH); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Tooltip box
+      const lines = [
+        fmtTime(c.time),
+        'O: '+c.open.toFixed(1)+'  H: '+c.high.toFixed(1),
+        'L: '+c.low.toFixed(1)+'  C: '+c.close.toFixed(1),
+        c.vwap  != null ? 'VWAP: '+c.vwap.toFixed(2)   : null,
+        c.ema20 != null ? 'EMA20: '+c.ema20.toFixed(2)  : null,
+        c.rsi14 != null ? 'RSI14: '+c.rsi14.toFixed(1)  : null,
+        c.volume > 0    ? 'Vol: '+c.volume.toLocaleString() : null,
+      ].filter(Boolean);
+
+      const TW = 148, TH = lines.length * 16 + 12;
+      let tx = x + 10;
+      if (tx + TW > W - PR - 4) tx = x - TW - 10;
+      const ty = PT + 6;
+
+      ctx.fillStyle = 'rgba(15,23,42,0.88)';
+      rrect(ctx, tx, ty, TW, TH, 5); ctx.fill();
+      ctx.fillStyle = '#f1f5f9'; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+      lines.forEach((l, j) => {
+        ctx.fillStyle = j === 0 ? '#7dd3fc' : j <= 2 ? '#e2e8f0'
+          : l.startsWith('VWAP') ? '#fcd34d'
+          : l.startsWith('EMA')  ? '#93c5fd'
+          : l.startsWith('RSI')  ? '#c4b5fd'
+          : '#94a3b8';
+        ctx.fillText(l, tx + 8, ty + 14 + j * 16);
+      });
+    }
+  }
+
+  _drawRsi() {
+    const { rc, rctx: ctx, candles, hoverIdx } = this;
+    const W = rc.width, H = rc.height;
+    if (!W || !H) return;
+    ctx.clearRect(0, 0, W, H);
+
+    const PL = 8, PR = 65, PT = 8, PB = 18;
+    const chartW = W - PL - PR;
+    const chartH = H - PT - PB;
+    const n = candles.length;
+    const cw = chartW / n;
+    const toX = i => PL + i * cw + cw / 2;
+    const toY = v => PT + chartH * (1 - (v / 100));
+
+    ctx.fillStyle = '#fafbff'; ctx.fillRect(0, 0, W, H);
+
+    // OB / OS / mid levels
+    for (const [level, color, dash] of [[70,'#fee2e2',[4,4]],[50,'#e2e8f0',[]],[30,'#dcfce7',[4,4]]]) {
+      const y = toY(level);
+      ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.setLineDash(dash);
+      ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(W - PR, y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#94a3b8'; ctx.font = '9px system-ui'; ctx.textAlign = 'left';
+      ctx.fillText(level, W - PR + 5, y + 3);
+    }
+
+    // RSI line
+    ctx.strokeStyle = '#7c3aed'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); let started = false;
+    for (let i = 0; i < n; i++) {
+      if (candles[i].rsi14 == null) continue;
+      const x = toX(i), y = toY(candles[i].rsi14);
+      started ? ctx.lineTo(x, y) : (ctx.moveTo(x, y), started = true);
+    }
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = '#7c3aed'; ctx.font = 'bold 9px system-ui'; ctx.textAlign = 'left';
+    ctx.fillText('RSI 14', PL + 4, PT + 10);
+
+    // Border
+    ctx.strokeStyle = '#e2e8f0'; ctx.lineWidth = 1; ctx.setLineDash([]);
+    ctx.strokeRect(PL, PT, chartW, chartH);
+
+    // Crosshair
+    if (hoverIdx >= 0 && hoverIdx < n && candles[hoverIdx].rsi14 != null) {
+      const x = toX(hoverIdx);
+      ctx.strokeStyle = 'rgba(100,116,139,0.4)'; ctx.lineWidth = 1; ctx.setLineDash([4,4]);
+      ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, PT + chartH); ctx.stroke();
+      ctx.setLineDash([]);
+      const rsi = candles[hoverIdx].rsi14;
+      ctx.fillStyle = rsi >= 70 ? '#dc2626' : rsi <= 30 ? '#16a34a' : '#7c3aed';
+      ctx.font = 'bold 10px system-ui'; ctx.textAlign = 'right';
+      ctx.fillText(rsi.toFixed(1), W - PR - 4, PT + 10);
+    }
+  }
+}
 
 function initChart() {
   if (chartReady) return;
-
-  const mainEl = document.getElementById('chart-container');
-  const rsiEl  = document.getElementById('rsi-container');
-
-  const chartOpts = {
-    layout: { background: { color: '#fff' }, textColor: '#333' },
-    grid:   { vertLines: { color: '#f1f5f9' }, horzLines: { color: '#f1f5f9' } },
-    crosshair: { mode: 1 },
-    rightPriceScale: { borderColor: '#e2e8f0', scaleMargins: { top: 0.08, bottom: 0.08 } },
-    timeScale: { borderColor: '#e2e8f0', timeVisible: true, secondsVisible: false },
-    handleScroll: true,
-    handleScale: true,
-  };
-
-  mainChart = LightweightCharts.createChart(mainEl, { ...chartOpts, height: 380 });
-  rsiChart  = LightweightCharts.createChart(rsiEl,  {
-    ...chartOpts, height: 110,
-    layout: { background: { color: '#fafbff' }, textColor: '#555' },
-    rightPriceScale: { borderColor: '#e2e8f0', scaleMargins: { top: 0.1, bottom: 0.1 } },
-  });
-
-  candleSeries = mainChart.addCandlestickSeries({
-    upColor: '#22c55e', downColor: '#ef4444',
-    borderUpColor: '#16a34a', borderDownColor: '#dc2626',
-    wickUpColor: '#16a34a', wickDownColor: '#dc2626',
-  });
-
-  vwapSeries = mainChart.addLineSeries({
-    color: '#f59e0b', lineWidth: 2, title: 'VWAP',
-    lastValueVisible: true, priceLineVisible: false,
-  });
-
-  emaSeries = mainChart.addLineSeries({
-    color: '#0070f3', lineWidth: 2, title: 'EMA20',
-    lastValueVisible: true, priceLineVisible: false,
-  });
-
-  rsiSeries = rsiChart.addLineSeries({
-    color: '#7c3aed', lineWidth: 2, title: 'RSI14',
-    lastValueVisible: true, priceLineVisible: false,
-  });
-
-  rsiObSeries = rsiChart.addLineSeries({
-    color: '#ef4444', lineWidth: 1, lineStyle: 2, // dashed
-    lastValueVisible: false, priceLineVisible: false,
-  });
-
-  rsiOsSeries = rsiChart.addLineSeries({
-    color: '#22c55e', lineWidth: 1, lineStyle: 2,
-    lastValueVisible: false, priceLineVisible: false,
-  });
-
-  // Sync scroll/zoom between main chart and RSI
-  mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-    if (syncingRange || !range) return;
-    syncingRange = true;
-    rsiChart.timeScale().setVisibleLogicalRange(range);
-    syncingRange = false;
-  });
-  rsiChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-    if (syncingRange || !range) return;
-    syncingRange = true;
-    mainChart.timeScale().setVisibleLogicalRange(range);
-    syncingRange = false;
-  });
-
-  // Resize observer
-  const ro = new ResizeObserver(() => {
-    const w = mainEl.clientWidth;
-    if (w > 0) {
-      mainChart.applyOptions({ width: w });
-      rsiChart.applyOptions({ width: w });
-    }
-  });
-  ro.observe(mainEl);
-
+  const mc = document.getElementById('chart-container');
+  const rc = document.getElementById('rsi-container');
+  mc.height = 380; rc.height = 110;
+  chart = new CandleChart(mc, rc);
   chartReady = true;
   document.getElementById('chart-empty').style.display = 'none';
   document.getElementById('chart-wrap').style.display = 'block';
@@ -658,68 +867,20 @@ function initChart() {
 }
 
 function updateChart(candles, status) {
-  if (!candles || candles.length === 0) return;
-
+  if (!candles || !candles.length) return;
   initChart();
 
   const todayCandles = candles.filter(c => c.is_today);
-  if (todayCandles.length === 0) return;
+  if (!todayCandles.length) return;
 
-  // OHLCV — today only
-  const ohlc = todayCandles.map(c => ({
-    time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
-  }));
-  candleSeries.setData(ohlc);
-
-  // VWAP — today only, filter nulls
-  const vwapData = todayCandles
-    .filter(c => c.vwap != null)
-    .map(c => ({ time: c.time, value: c.vwap }));
-  vwapSeries.setData(vwapData);
-
-  // EMA20 — today only, filter nulls
-  const emaData = todayCandles
-    .filter(c => c.ema20 != null)
-    .map(c => ({ time: c.time, value: c.ema20 }));
-  emaSeries.setData(emaData);
-
-  // RSI — today only, filter nulls
-  const rsiData = todayCandles
-    .filter(c => c.rsi14 != null)
-    .map(c => ({ time: c.time, value: c.rsi14 }));
-  rsiSeries.setData(rsiData);
-
-  // RSI OB/OS horizontal reference lines
-  if (rsiData.length >= 2) {
-    const tFirst = rsiData[0].time;
-    const tLast  = rsiData[rsiData.length - 1].time;
-    rsiObSeries.setData([{ time: tFirst, value: 70 }, { time: tLast, value: 70 }]);
-    rsiOsSeries.setData([{ time: tFirst, value: 30 }, { time: tLast, value: 30 }]);
-  }
-
-  // Entry marker for open position
+  let marker = null;
   if (status && status.position && status.position.entry_time) {
-    const entryHHMM = status.position.entry_time.slice(0, 5); // "HH:MM"
-    const optType   = status.position.option_type;
-    const markerCandle = todayCandles.find(c => {
-      const d = new Date(c.time * 1000);
-      const hh = d.getUTCHours().toString().padStart(2,'0');
-      const mm = d.getUTCMinutes().toString().padStart(2,'0');
-      return (hh+':'+mm) === entryHHMM;
-    });
-    if (markerCandle) {
-      candleSeries.setMarkers([{
-        time:     markerCandle.time,
-        position: optType === 'CE' ? 'belowBar' : 'aboveBar',
-        color:    optType === 'CE' ? '#16a34a' : '#dc2626',
-        shape:    optType === 'CE' ? 'arrowUp'  : 'arrowDown',
-        text:     'ENTRY',
-        size:     1,
-      }]);
-    }
-  } else {
-    candleSeries.setMarkers([]);
+    const entryHHMM = status.position.entry_time.slice(0, 5);
+    const found = todayCandles.find(c => fmtTime(c.time) === entryHHMM);
+    if (found) marker = { time: found.time, type: status.position.option_type };
   }
+
+  chart.setData(todayCandles, marker);
 }
 
 /* ══════════════════════════════════════════════════════════════
