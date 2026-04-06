@@ -341,6 +341,27 @@ class TradingEngine:
                 "breakeven_set": p.breakeven_set,
             }
 
+        # Current indicator snapshot
+        ind_snap = {}
+        if len(state.candles) >= MIN_CANDLES:
+            ind = get_latest_indicators(state.candles)
+            if ind.get("enough_data"):
+                ind_snap = {
+                    "vwap":         ind.get("vwap"),
+                    "ema20":        round(ind["ema20"], 2) if ind.get("ema20") else None,
+                    "rsi14":        round(ind["rsi14"], 2) if ind.get("rsi14") else None,
+                    "volume_surge": ind.get("volume_surge"),
+                }
+
+        instruments_info = None
+        if self._ce_instrument:
+            instruments_info = {
+                "ce":           self._ce_instrument["tradingsymbol"],
+                "pe":           self._pe_instrument["tradingsymbol"] if self._pe_instrument else None,
+                "atm_strike":   int(self._ce_instrument["strike"]),
+                "candle_source": self._nifty_futures_symbol or "NIFTY INDEX (no volume)",
+            }
+
         return {
             "strategy":        "NIFTY_INTRADAY_VWAP_EMA_BREAKOUT",
             "mode":            state.trading_mode,
@@ -361,12 +382,66 @@ class TradingEngine:
             "exit_reason":     state.exit_reason,
             "exit_price":      state.exit_price,
             "error":           state.error_message,
-            "instruments": {
-                "ce": self._ce_instrument["tradingsymbol"] if self._ce_instrument else None,
-                "pe": self._pe_instrument["tradingsymbol"] if self._pe_instrument else None,
-                "candle_source": self._nifty_futures_symbol or "NIFTY INDEX (no volume)",
-            } if self._ce_instrument else None,
+            "indicators":      ind_snap,
+            "instruments":     instruments_info,
         }
+
+    # ------------------------------------------------------------------
+    # Dynamic ATM reselection
+    # ------------------------------------------------------------------
+
+    def _recalculate_atm(self) -> None:
+        """
+        Called on every 5-min candle close.
+        If Nifty has moved enough to shift the ATM strike, swap CE/PE instruments
+        and update WebSocket subscriptions. Skipped when a position is open.
+        Fix vs. previous attempt: do NOT reset ce_ltp/pe_ltp to 0 — let the
+        WebSocket deliver the new instrument's tick naturally within milliseconds.
+        """
+        state = get_state()
+        if state.position is not None:
+            return  # Never change instruments mid-trade
+
+        if state.nifty_spot <= 0 or not self._ce_instrument:
+            return
+
+        new_atm = get_atm_strike(state.nifty_spot)
+        current_atm = int(self._ce_instrument["strike"])
+
+        if new_atm == current_atm:
+            return  # Strike unchanged
+
+        logger.info(
+            "ATM shift detected | %d → %d | spot=%.1f",
+            current_atm, new_atm, state.nifty_spot,
+        )
+
+        try:
+            expiry = get_current_expiry(self._instruments)
+            new_ce = find_option_instrument(self._instruments, expiry, new_atm, "CE")
+            new_pe = find_option_instrument(self._instruments, expiry, new_atm, "PE")
+        except ValueError as e:
+            logger.warning("ATM reselection failed — keeping old strike: %s", e)
+            return
+
+        old_tokens = [
+            self._ce_instrument["instrument_token"],
+            self._pe_instrument["instrument_token"],
+        ]
+        new_tokens = [
+            new_ce["instrument_token"],
+            new_pe["instrument_token"],
+        ]
+
+        self._ce_instrument = new_ce
+        self._pe_instrument = new_pe
+        # Do NOT reset ce_ltp/pe_ltp — WebSocket will update them naturally
+        self._market_data.swap_option_subscriptions(old_tokens, new_tokens)
+
+        logger.info(
+            "ATM updated | strike=%d | CE=%s PE=%s",
+            new_atm, new_ce["tradingsymbol"], new_pe["tradingsymbol"],
+        )
 
     # ------------------------------------------------------------------
     # WebSocket callbacks
@@ -392,6 +467,9 @@ class TradingEngine:
         with get_lock():
             get_raw_state().candles.append(candle)
             get_raw_state().last_candle_time = candle.timestamp
+
+        # Recalculate ATM on every candle — skipped if position is open
+        self._recalculate_atm()
 
         state = get_state()
 

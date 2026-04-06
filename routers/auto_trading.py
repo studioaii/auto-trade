@@ -106,6 +106,54 @@ async def get_paper_log():
     }
 
 
+@router.get("/candles")
+async def get_candles():
+    """Return today's session candles with per-candle EMA20, RSI14, VWAP for live chart."""
+    from services.indicators import compute_ema, compute_rsi
+
+    state = get_state()
+    candles = state.candles
+    if not candles:
+        return {"candles": []}
+
+    today = candles[-1].timestamp.date()
+    closes = [c.close for c in candles]
+    ema20_series = compute_ema(closes, 20)
+    rsi14_series = compute_rsi(closes, 14)
+
+    # Cumulative intraday VWAP — resets at today's first candle
+    vwap_cum_tp = 0.0
+    vwap_cum_vol = 0.0
+
+    # IST offset so browser chart (UTC display) shows correct IST times
+    IST_OFFSET = 19800  # 5.5 * 3600
+
+    result = []
+    for i, c in enumerate(candles):
+        is_today = c.timestamp.date() == today
+        vwap_val = None
+        if is_today:
+            tp = (c.high + c.low + c.close) / 3.0
+            vwap_cum_tp += tp * c.volume
+            vwap_cum_vol += c.volume
+            vwap_val = round(vwap_cum_tp / vwap_cum_vol, 2) if vwap_cum_vol > 0 else None
+
+        result.append({
+            "time":    int(c.timestamp.timestamp()) + IST_OFFSET,
+            "open":    c.open,
+            "high":    c.high,
+            "low":     c.low,
+            "close":   c.close,
+            "volume":  c.volume,
+            "ema20":   round(ema20_series[i], 2) if ema20_series[i] is not None else None,
+            "rsi14":   round(rsi14_series[i], 2) if rsi14_series[i] is not None else None,
+            "vwap":    vwap_val,
+            "is_today": is_today,
+        })
+
+    return {"candles": result}
+
+
 @router.get("/paper-log/download")
 async def download_paper_log():
     """Download paper_trades.csv file directly."""

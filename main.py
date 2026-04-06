@@ -23,10 +23,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Kite Connect backend starting up")
+    logger.info("Logesh Auto Trading Engine starting up")
     yield
-    logger.info("Kite Connect backend shutting down")
-    # Best-effort cleanup of trading engine on server shutdown
+    logger.info("Logesh Auto Trading Engine shutting down")
     from services.trading_state import get_state
     from services.strategy_engine import get_engine
     from services.kite_service import get_stored_token, require_authenticated_client
@@ -40,9 +39,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Kite Connect Backend",
-    description="Minimal FastAPI integration with Zerodha Kite Connect API + Automated Nifty Options Trading",
-    version="2.0.0",
+    title="Logesh Auto Trading Engine",
+    description="Automated Nifty Options Trading — VWAP+EMA Breakout Strategy",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -53,75 +52,103 @@ app.include_router(backtest.router)
 
 
 # ---------------------------------------------------------------------------
-# Landing page
+# Dashboard
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def root():
-    return """
-<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <title>Kite Connect — Trading Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Logesh Auto Trading Engine</title>
+  <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:system-ui,sans-serif;background:#f0f2f5;color:#222;padding:24px 16px}
-    h1{color:#0070f3;font-size:22px;margin-bottom:2px}
-    .subtitle{color:#888;font-size:12px;margin-bottom:20px}
+    body{font-family:system-ui,-apple-system,sans-serif;background:#f0f2f5;color:#111;min-height:100vh}
 
-    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
-    .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:16px}
-    @media(max-width:600px){.grid2,.grid3{grid-template-columns:1fr}}
+    /* ── HEADER ── */
+    header{background:#0f172a;color:#fff;padding:10px 20px;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.3)}
+    .hdr{display:flex;align-items:center;justify-content:space-between;max-width:1400px;margin:0 auto;gap:12px;flex-wrap:wrap}
+    .hdr h1{font-size:17px;font-weight:800;color:#38bdf8;letter-spacing:-.3px;white-space:nowrap}
+    .hdr .sub{font-size:10px;color:#64748b;margin-top:1px}
+    .tabs{display:flex;gap:4px}
+    .tab{background:transparent;border:1px solid rgba(255,255,255,.15);color:#94a3b8;padding:6px 16px;border-radius:7px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+    .tab:hover{border-color:rgba(255,255,255,.4);color:#e2e8f0}
+    .tab.active{background:#0070f3;border-color:#0070f3;color:#fff}
 
-    .card{background:#fff;border-radius:12px;padding:18px 20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-    .card-title{font-size:13px;font-weight:700;color:#555;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+    /* ── LAYOUT ── */
+    .page{max-width:1400px;margin:0 auto;padding:14px 16px}
 
-    /* stat tiles */
-    .stat{background:#fff;border-radius:10px;padding:14px 16px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
-    .stat .lbl{font-size:11px;color:#999;text-transform:uppercase;letter-spacing:.4px}
-    .stat .val{font-size:20px;font-weight:800;margin-top:4px;color:#111}
-    .val.g{color:#16a34a}.val.r{color:#dc2626}.val.b{color:#0070f3}
+    /* ── CARDS ── */
+    .card{background:#fff;border-radius:12px;padding:16px 20px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:14px}
+    .card-title{font-size:13px;font-weight:700;color:#555;margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 
-    /* engine */
+    /* ── ENGINE CARD ── */
     .engine-card{border:2px solid #dbeafe}
-    .status-row{display:flex;align-items:center;gap:10px;background:#f0f6ff;border-radius:8px;padding:9px 13px;font-size:13px;margin-bottom:14px;flex-wrap:wrap;gap:6px}
+    .status-row{display:flex;align-items:center;gap:8px;background:#f0f6ff;border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:12px;flex-wrap:wrap}
     .dot{width:9px;height:9px;border-radius:50%;background:#ccc;flex-shrink:0}
-    .dot.on{background:#22c55e;box-shadow:0 0 5px #22c55e}.dot.off{background:#ef4444}
-    .sep{color:#ccc}
-
-    .btn{display:inline-flex;align-items:center;gap:5px;padding:9px 18px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s,transform .1s}
+    .dot.on{background:#22c55e;box-shadow:0 0 6px #22c55e88}.dot.off{background:#ef4444}
+    .sep{color:#ccc;font-size:11px}
+    .btn{display:inline-flex;align-items:center;gap:5px;padding:8px 16px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s,transform .1s}
     .btn:hover{opacity:.87}.btn:active{transform:scale(.97)}
     .btn:disabled{opacity:.38;cursor:not-allowed;transform:none}
     .g-btn{background:#22c55e;color:#fff}.r-btn{background:#ef4444;color:#fff}
-    .b-btn{background:#0070f3;color:#fff}.s-btn{background:#f1f5f9;color:#444;border:1px solid #ddd}
-    .btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-
-    #msg{margin-top:10px;padding:9px 13px;border-radius:8px;font-size:12px;display:none}
+    .b-btn{background:#0070f3;color:#fff}.s-btn{background:#f1f5f9;color:#444;border:1px solid #e2e8f0}
+    .btn-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+    .badge{font-size:10px;font-weight:700;padding:2px 8px;border-radius:8px}
+    .bp{background:#fef9c3;color:#854d0e}.bl{background:#fee2e2;color:#991b1b}
+    #msg{margin-top:8px;padding:8px 12px;border-radius:8px;font-size:12px;display:none}
     #msg.ok{background:#dcfce7;color:#166534;display:block}
     #msg.err{background:#fee2e2;color:#991b1b;display:block}
+    .strat-note{font-size:10px;color:#aaa;margin-top:10px;line-height:1.7}
 
-    .badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:8px}
-    .bp{background:#fef9c3;color:#854d0e}.bl{background:#fee2e2;color:#991b1b}
+    /* ── MARKET DATA STRIP ── */
+    .mstrip{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+    @media(max-width:700px){.mstrip{grid-template-columns:repeat(2,1fr)}}
+    .mtile{background:#fff;border-radius:10px;padding:12px 14px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
+    .mtile .lbl{font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px}
+    .mtile .val{font-size:20px;font-weight:800;color:#111;margin-top:3px}
+    .mtile .sub{font-size:10px;font-weight:700;margin-top:3px}
+    .sub-ce{color:#0369a1}.sub-pe{color:#9d174d}
 
-    .live-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
-    @media(max-width:500px){.live-grid{grid-template-columns:1fr 1fr}}
-    .li{background:#f8fafc;border-radius:8px;padding:10px 12px}
-    .li .lbl{font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.4px}
-    .li .val{font-size:15px;font-weight:700;color:#111;margin-top:3px}
+    /* ── INDICATORS STRIP ── */
+    .istrip{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:14px}
+    @media(max-width:900px){.istrip{grid-template-columns:repeat(3,1fr)}}
+    @media(max-width:500px){.istrip{grid-template-columns:repeat(2,1fr)}}
+    .itile{background:#fff;border-radius:8px;padding:10px 12px;box-shadow:0 1px 3px rgba(0,0,0,.07)}
+    .itile .lbl{font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.3px}
+    .itile .val{font-size:14px;font-weight:700;color:#111;margin-top:3px}
 
-    /* open position banner */
-    #pos-banner{display:none;margin-top:12px;padding:12px 16px;border-radius:10px;background:linear-gradient(135deg,#eff6ff,#e0f2fe);border:1px solid #bfdbfe}
-    .pos-row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
-    .pos-sym{font-size:16px;font-weight:800;color:#1d4ed8}
-    .pos-meta{font-size:12px;color:#64748b}
-    .pos-pnl{font-size:18px;font-weight:800}
+    /* ── CHART ── */
+    .chart-card{padding:14px 16px}
+    .chart-legend{display:flex;gap:14px;align-items:center;margin-bottom:8px;font-size:11px;flex-wrap:wrap}
+    .leg{display:flex;align-items:center;gap:5px;color:#555}
+    .leg-line{width:18px;height:3px;border-radius:2px}
+    #chart-container{width:100%;height:380px}
+    #rsi-container{width:100%;height:110px;margin-top:3px}
+    #chart-empty{text-align:center;padding:60px 20px;color:#aaa;font-size:13px;border:2px dashed #e2e8f0;border-radius:10px}
+
+    /* ── POSITION BANNER ── */
+    #pos-banner{display:none;margin-bottom:14px;padding:14px 18px;border-radius:12px;background:linear-gradient(135deg,#eff6ff,#e0f2fe);border:1px solid #bfdbfe}
+    .pos-row{display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px}
+    .pos-sym{font-size:17px;font-weight:800;color:#1d4ed8}
+    .pos-meta{font-size:12px;color:#64748b;margin-top:2px}
     .pos-sl{font-size:11px;color:#888;margin-top:4px}
+    .pos-pnl{font-size:20px;font-weight:800}
+    .pos-entry{font-size:12px;color:#64748b;margin-top:3px}
 
-    /* paper trade table */
-    .tbl-wrap{overflow-x:auto;margin-top:12px}
+    /* ── TRADE TABLE ── */
+    .sum-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+    @media(max-width:500px){.sum-grid{grid-template-columns:1fr 1fr}}
+    .stat{background:#f8fafc;border-radius:8px;padding:10px 12px}
+    .stat .lbl{font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.4px}
+    .stat .val{font-size:18px;font-weight:800;margin-top:3px;color:#111}
+    .val.g{color:#16a34a}.val.r{color:#dc2626}.val.b{color:#0070f3}
+    .tbl-wrap{overflow-x:auto;margin-top:10px}
     table{width:100%;border-collapse:collapse;font-size:12px}
-    th{background:#f8fafc;padding:8px 10px;text-align:left;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.4px;border-bottom:2px solid #e2e8f0;white-space:nowrap}
-    td{padding:9px 10px;border-bottom:1px solid #f1f5f9;vertical-align:middle;white-space:nowrap}
+    th{background:#f8fafc;padding:8px 10px;text-align:left;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.4px;border-bottom:2px solid #e2e8f0;white-space:nowrap}
+    td{padding:8px 10px;border-bottom:1px solid #f1f5f9;vertical-align:middle;white-space:nowrap}
     tr:hover td{background:#fafbff}
     .pill{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700}
     .pill-ce{background:#e0f2fe;color:#0369a1}
@@ -131,70 +158,148 @@ def root():
     .pill-exit{background:#f1f5f9;color:#475569;font-size:10px}
     .empty-state{text-align:center;padding:32px;color:#aaa;font-size:13px}
 
-    /* summary stats row */
-    .sum-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-    @media(max-width:500px){.sum-grid{grid-template-columns:1fr 1fr}}
-
-    /* links */
-    a{color:#0070f3;text-decoration:none;font-size:13px}
-    a:hover{text-decoration:underline}
-    .lrow{display:flex;align-items:center;gap:8px;margin:6px 0}
-    .mt{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;font-family:monospace}
-    .mget{background:#dbeafe;color:#1e40af}.mpost{background:#dcfce7;color:#166534}
-
-    .strategy-note{font-size:11px;color:#aaa;margin-top:12px;line-height:1.7}
-
-    /* multi-bt */
+    /* ── BACKTEST ── */
     .mbt-sum-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:10px}
     @media(max-width:700px){.mbt-sum-grid{grid-template-columns:repeat(3,1fr)}}
     tr.mbt-row{cursor:pointer;transition:background .12s}
     tr.mbt-row:hover td{background:#eff6ff}
     tr.mbt-row.active td{background:#dbeafe;font-weight:600}
     .cum-bar{display:inline-block;height:12px;border-radius:3px;min-width:2px;vertical-align:middle}
+
+    /* ── LINKS ── */
+    a{color:#0070f3;text-decoration:none;font-size:13px}
+    a:hover{text-decoration:underline}
+    .lrow{display:flex;align-items:center;gap:8px;margin:6px 0}
+    .mt{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;font-family:monospace}
+    .mget{background:#dbeafe;color:#1e40af}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+    @media(max-width:600px){.grid2{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
-<h1>Kite Connect Dashboard</h1>
-<p class="subtitle">NIFTY_INTRADAY_VWAP_EMA_BREAKOUT &nbsp;·&nbsp; Paper Trading Mode</p>
 
-<!-- ── ENGINE CARD ─────────────────────────────────────────────── -->
-<div class="card engine-card" style="margin-bottom:16px">
-  <div class="card-title">
-    ⚡ Auto Trading Engine
-    <span id="mode-badge" class="badge bp">PAPER</span>
+<!-- ═══ HEADER ═══════════════════════════════════════════════════════════ -->
+<header>
+  <div class="hdr">
+    <div>
+      <h1>⚡ Logesh Auto Trading Engine</h1>
+      <div class="sub">NIFTY VWAP+EMA Breakout &nbsp;·&nbsp; 5-min candles &nbsp;·&nbsp; Options</div>
+    </div>
+    <div class="tabs">
+      <button class="tab active" id="tab-btn-dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab" id="tab-btn-backtest" onclick="switchTab('backtest')">Backtest</button>
+    </div>
+  </div>
+</header>
+
+<!-- ═══ DASHBOARD TAB ════════════════════════════════════════════════════ -->
+<div id="page-dashboard" class="page">
+
+  <!-- ENGINE CONTROL -->
+  <div class="card engine-card">
+    <div class="card-title">
+      Auto Trading Engine
+      <span id="mode-badge" class="badge bp">PAPER</span>
+    </div>
+
+    <div class="status-row">
+      <div class="dot off" id="engine-dot"></div>
+      <span id="engine-status-text">Engine stopped</span>
+      <span class="sep">|</span>
+      <span id="trades-count">Trades: 0 / 2</span>
+      <span class="sep">|</span>
+      <span id="candle-info">Candles: 0 / 22</span>
+      <span class="sep">|</span>
+      <span id="market-state-top">Market: —</span>
+      <span class="sep">|</span>
+      <span id="atm-info" style="font-weight:700;color:#0070f3">ATM: —</span>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn g-btn" id="btn-start" onclick="startEngine()">▶ Start Engine</button>
+      <button class="btn r-btn" id="btn-stop"  onclick="stopEngine()" disabled>■ Stop Engine</button>
+      <button class="btn b-btn" onclick="refreshAll()">↻ Refresh</button>
+    </div>
+
+    <div id="msg"></div>
+
+    <div class="strat-note">
+      VWAP + EMA(20) · Dynamic SL (12–22%) · Trailing SL from +20% · RSI + Volume filters · Max 2 trades/day · 9:50–14:00 entries · Force exit 3:20 PM
+    </div>
   </div>
 
-  <div class="status-row">
-    <div class="dot off" id="engine-dot"></div>
-    <span id="engine-status-text">Engine stopped</span>
-    <span class="sep">|</span>
-    <span id="trades-count">Trades: 0 / 2</span>
-    <span class="sep">|</span>
-    <span id="candle-info">Candles: 0 / 22</span>
-    <span class="sep">|</span>
-    <span id="market-state-top">Market: —</span>
+  <!-- MARKET DATA STRIP -->
+  <div class="mstrip" id="mstrip" style="display:none">
+    <div class="mtile">
+      <div class="lbl">Nifty Spot (Index)</div>
+      <div class="val" id="m-spot">—</div>
+    </div>
+    <div class="mtile">
+      <div class="lbl">Nifty Futures</div>
+      <div class="val" id="m-fut">—</div>
+    </div>
+    <div class="mtile">
+      <div class="lbl">ATM CE LTP</div>
+      <div class="val" id="m-ce">—</div>
+      <div class="sub sub-ce" id="m-ce-sym">—</div>
+    </div>
+    <div class="mtile">
+      <div class="lbl">ATM PE LTP</div>
+      <div class="val" id="m-pe">—</div>
+      <div class="sub sub-pe" id="m-pe-sym">—</div>
+    </div>
   </div>
 
-  <div class="btn-row">
-    <button class="btn g-btn" id="btn-start" onclick="startEngine()">▶ Start Engine</button>
-    <button class="btn r-btn" id="btn-stop"  onclick="stopEngine()" disabled>■ Stop Engine</button>
-    <button class="btn b-btn" onclick="refreshStatus()">↻ Refresh</button>
+  <!-- INDICATORS STRIP -->
+  <div class="istrip" id="istrip" style="display:none">
+    <div class="itile">
+      <div class="lbl">VWAP</div>
+      <div class="val" id="i-vwap" style="color:#f59e0b">—</div>
+    </div>
+    <div class="itile">
+      <div class="lbl">EMA 20</div>
+      <div class="val" id="i-ema" style="color:#0070f3">—</div>
+    </div>
+    <div class="itile">
+      <div class="lbl">RSI 14</div>
+      <div class="val" id="i-rsi" style="color:#7c3aed">—</div>
+    </div>
+    <div class="itile">
+      <div class="lbl">Vol Surge</div>
+      <div class="val" id="i-vol">—</div>
+    </div>
+    <div class="itile">
+      <div class="lbl">Last Signal</div>
+      <div class="val" id="i-sig">—</div>
+    </div>
+    <div class="itile">
+      <div class="lbl">Last Candle</div>
+      <div class="val" id="i-candle">—</div>
+    </div>
   </div>
 
-  <div id="msg"></div>
-
-  <!-- live stats grid -->
-  <div class="live-grid" id="live-grid" style="display:none">
-    <div class="li"><div class="lbl">Nifty Spot (Index)</div><div class="val" id="nifty-spot">—</div></div>
-    <div class="li"><div class="lbl">Nifty Futures</div><div class="val" id="nifty-futures">—</div></div>
-    <div class="li"><div class="lbl">ATM CE LTP</div><div class="val" id="ce-ltp">—</div><div class="lbl" id="ce-sym" style="margin-top:3px;color:#0369a1;font-size:10px;font-weight:700">—</div></div>
-    <div class="li"><div class="lbl">ATM PE LTP</div><div class="val" id="pe-ltp">—</div><div class="lbl" id="pe-sym" style="margin-top:3px;color:#9d174d;font-size:10px;font-weight:700">—</div></div>
-    <div class="li"><div class="lbl">Last Signal</div><div class="val" id="last-signal">—</div></div>
-    <div class="li"><div class="lbl">Last Candle</div><div class="val" id="last-candle">—</div></div>
-    <div class="li"><div class="lbl">Exit Reason</div><div class="val" id="exit-reason">—</div></div>
+  <!-- LIVE CHART -->
+  <div class="card chart-card">
+    <div class="card-title" style="justify-content:space-between">
+      <span>Live Chart — NIFTY 5-min</span>
+      <div class="chart-legend" id="chart-legend" style="display:none">
+        <div class="leg"><div class="leg-line" style="background:#f59e0b"></div>VWAP</div>
+        <div class="leg"><div class="leg-line" style="background:#0070f3"></div>EMA 20</div>
+        <div class="leg"><div class="leg-line" style="background:#7c3aed"></div>RSI 14</div>
+        <div class="leg"><div class="leg-line" style="background:#ef4444;height:1px"></div>OB 70</div>
+        <div class="leg"><div class="leg-line" style="background:#22c55e;height:1px"></div>OS 30</div>
+      </div>
+    </div>
+    <div id="chart-empty">
+      Start the engine to see live candlestick chart with VWAP &amp; EMA overlays.
+    </div>
+    <div id="chart-wrap" style="display:none">
+      <div id="chart-container"></div>
+      <div id="rsi-container"></div>
+    </div>
   </div>
 
-  <!-- open position banner -->
+  <!-- OPEN POSITION BANNER -->
   <div id="pos-banner">
     <div class="pos-row">
       <div>
@@ -204,230 +309,117 @@ def root():
       </div>
       <div style="text-align:right">
         <div class="pos-pnl" id="pos-pnl">—</div>
-        <div class="pos-meta" id="pos-entry">—</div>
+        <div class="pos-entry" id="pos-entry">—</div>
       </div>
     </div>
   </div>
 
-  <div class="strategy-note">
-    VWAP + EMA(20) · 5-min candles · Dynamic SL (12–22%) · Trail from +20% (8%→20% gap) · No hard profit target · RSI + Volume filters · Max 2 trades/day · 9:50–14:00 entries · Force exit 3:20 PM
-  </div>
-</div>
-
-<!-- ── PAPER TRADE LOG ─────────────────────────────────────────── -->
-<div class="card" style="margin-bottom:16px">
-  <div class="card-title" style="justify-content:space-between">
-    <span>📋 Paper Trade Log</span>
-    <div style="display:flex;gap:8px;align-items:center">
-      <button class="btn s-btn" style="padding:5px 12px;font-size:12px" onclick="loadTrades()">↻ Refresh</button>
-      <a href="/auto-trading/paper-log/download" style="font-size:12px">⬇ CSV</a>
+  <!-- PAPER TRADE LOG -->
+  <div class="card">
+    <div class="card-title" style="justify-content:space-between">
+      <span>📋 Paper Trade Log</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn s-btn" style="padding:5px 12px;font-size:12px" onclick="loadTrades()">↻ Refresh</button>
+        <a href="/auto-trading/paper-log/download" style="font-size:12px">⬇ CSV</a>
+      </div>
     </div>
-  </div>
-
-  <!-- summary stats -->
-  <div class="sum-grid" id="sum-grid" style="display:none">
-    <div class="stat"><div class="lbl">Total Trades</div><div class="val b" id="s-total">0</div></div>
-    <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="s-wr">—</div></div>
-    <div class="stat"><div class="lbl">Total P&amp;L</div><div class="val" id="s-pnl">—</div></div>
-    <div class="stat"><div class="lbl">Avg Win / Loss</div><div class="val" id="s-avg">—</div></div>
-  </div>
-
-  <div class="tbl-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>#</th><th>Date</th><th>Type</th><th>Symbol</th>
-          <th>Entry Time</th><th>Entry ₹</th>
-          <th>Exit Time</th><th>Exit ₹</th>
-          <th>P&amp;L ₹</th><th>P&amp;L %</th>
-          <th>Exit Reason</th><th>Entry Reason</th>
-        </tr>
-      </thead>
-      <tbody id="trade-tbody">
-        <tr><td colspan="12" class="empty-state">No paper trades yet. Start the engine to begin.</td></tr>
-      </tbody>
-    </table>
-  </div>
-</div>
-
-<!-- ── BACKTEST ────────────────────────────────────────────────── -->
-<div class="card" style="margin-bottom:16px" id="backtest-card">
-  <div class="card-title">🔁 Strategy Backtest</div>
-
-  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
-    <div>
-      <label style="font-size:11px;color:#999;display:block;margin-bottom:3px">Select Date</label>
-      <input type="date" id="bt-date" style="padding:7px 10px;border:1px solid #ddd;border-radius:7px;font-size:13px;color:#222"/>
-    </div>
-    <div style="margin-top:18px">
-      <button class="btn b-btn" id="bt-btn" onclick="runBacktest()">▶ Run Backtest</button>
-    </div>
-  </div>
-  <p style="font-size:11px;color:#aaa;margin-bottom:10px">
-    Replays the VWAP+EMA strategy on historical Nifty 5-min data.
-    P&amp;L shown in Nifty index points — estimated options ₹ ≈ points × 0.5 × 75 lot.
-  </p>
-
-  <div id="bt-msg" style="display:none;padding:9px 13px;border-radius:8px;font-size:12px;margin-bottom:10px"></div>
-
-  <!-- Summary -->
-  <div id="bt-summary" style="display:none;margin-bottom:14px">
-    <div class="sum-grid" style="grid-template-columns:repeat(4,1fr)">
-      <div class="stat"><div class="lbl">Trades</div><div class="val b" id="bt-s-total">0</div></div>
-      <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="bt-s-wr">—</div></div>
-      <div class="stat"><div class="lbl">Total Points</div><div class="val" id="bt-s-pts">—</div></div>
-      <div class="stat"><div class="lbl">Avg Win / Loss pts</div><div class="val" id="bt-s-avg">—</div></div>
-    </div>
-  </div>
-
-  <!-- Trade results -->
-  <div id="bt-trades" style="display:none;margin-bottom:14px">
-    <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:8px">Trades</div>
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>#</th><th>Signal</th>
-            <th>Entry</th><th>Entry Nifty</th>
-            <th>Exit</th><th>Exit Nifty</th>
-            <th>Nifty Pts</th><th>Est ₹ P&amp;L</th><th>Exit Reason</th><th>Result</th>
-          </tr>
-        </thead>
-        <tbody id="bt-trade-tbody"></tbody>
-      </table>
-    </div>
-  </div>
-
-  <!-- Candle timeline -->
-  <div id="bt-candles" style="display:none">
-    <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:8px">
-      5-Min Candle Timeline
-      <span style="font-size:10px;font-weight:400;color:#aaa;margin-left:6px">highlighted rows = active trade</span>
-    </div>
-    <div class="tbl-wrap" style="max-height:380px;overflow-y:auto">
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th>
-            <th>VWAP</th><th>EMA20</th><th>Market</th><th>Signal</th><th>Note</th>
-          </tr>
-        </thead>
-        <tbody id="bt-candle-tbody"></tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<!-- ── MULTI-DAY BACKTEST ──────────────────────────────────────── -->
-<div class="card" style="margin-bottom:16px" id="multi-bt-card">
-  <div class="card-title">📊 Multi-Day Backtest</div>
-
-  <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
-    <div>
-      <label style="font-size:11px;color:#999;display:block;margin-bottom:3px">From Date</label>
-      <input type="date" id="mbt-from" style="padding:7px 10px;border:1px solid #ddd;border-radius:7px;font-size:13px;color:#222"/>
-    </div>
-    <div>
-      <label style="font-size:11px;color:#999;display:block;margin-bottom:3px">To Date</label>
-      <input type="date" id="mbt-to" style="padding:7px 10px;border:1px solid #ddd;border-radius:7px;font-size:13px;color:#222"/>
-    </div>
-    <div>
-      <button class="btn b-btn" id="mbt-btn" onclick="runMultiBacktest()">▶ Run Multi-Day</button>
-    </div>
-    <div style="display:flex;gap:4px;flex-wrap:wrap">
-      <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(5)">5D</button>
-      <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(10)">10D</button>
-      <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(30)">30D</button>
-      <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(60)">60D</button>
-    </div>
-  </div>
-  <p style="font-size:11px;color:#aaa;margin-bottom:10px">
-    Runs strategy on each trading day in the range. Click any date row to see full trade details + candle timeline.
-    Max 90 days.
-  </p>
-
-  <div id="mbt-msg" style="display:none;padding:9px 13px;border-radius:8px;font-size:12px;margin-bottom:10px"></div>
-  <div id="mbt-progress" style="display:none;margin-bottom:10px">
-    <div style="background:#e2e8f0;border-radius:6px;height:6px;overflow:hidden">
-      <div id="mbt-progress-bar" style="width:0%;height:100%;background:#0070f3;border-radius:6px;transition:width .3s"></div>
-    </div>
-    <div style="font-size:11px;color:#888;margin-top:4px" id="mbt-progress-text"></div>
-  </div>
-
-  <!-- Aggregate Summary -->
-  <div id="mbt-summary" style="display:none;margin-bottom:16px">
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:10px" class="mbt-sum-grid">
-      <div class="stat"><div class="lbl">Trading Days</div><div class="val b" id="mbt-days">0</div></div>
-      <div class="stat"><div class="lbl">Total Trades</div><div class="val b" id="mbt-total">0</div></div>
-      <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="mbt-wr">—</div></div>
-      <div class="stat"><div class="lbl">Total P&amp;L</div><div class="val" id="mbt-pnl">—</div></div>
-      <div class="stat"><div class="lbl">Max Drawdown</div><div class="val r" id="mbt-dd">—</div></div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
-      <div class="stat"><div class="lbl">Avg Win Pts</div><div class="val g" id="mbt-avgw">—</div></div>
-      <div class="stat"><div class="lbl">Avg Loss Pts</div><div class="val r" id="mbt-avgl">—</div></div>
-      <div class="stat"><div class="lbl">Best Day</div><div class="val g" id="mbt-best">—</div></div>
-      <div class="stat"><div class="lbl">Worst Day</div><div class="val r" id="mbt-worst">—</div></div>
-    </div>
-  </div>
-
-  <!-- Day-by-day table -->
-  <div id="mbt-daily" style="display:none;margin-bottom:14px">
-    <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:8px">
-      Day-by-Day Results
-      <span style="font-size:10px;font-weight:400;color:#aaa;margin-left:6px">click a row to see full details</span>
+    <div class="sum-grid" id="sum-grid" style="display:none">
+      <div class="stat"><div class="lbl">Total Trades</div><div class="val b" id="s-total">0</div></div>
+      <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="s-wr">—</div></div>
+      <div class="stat"><div class="lbl">Total P&amp;L</div><div class="val" id="s-pnl">—</div></div>
+      <div class="stat"><div class="lbl">Avg Win / Loss</div><div class="val" id="s-avg">—</div></div>
     </div>
     <div class="tbl-wrap">
       <table>
         <thead>
           <tr>
-            <th>Date</th><th>Day</th><th>Trades</th><th>Wins</th><th>Losses</th>
-            <th>Win Rate</th><th>Nifty Pts</th><th>Est ₹ P&amp;L</th><th>Cum. Pts</th>
+            <th>#</th><th>Date</th><th>Type</th><th>Symbol</th>
+            <th>Entry</th><th>Entry ₹</th>
+            <th>Exit</th><th>Exit ₹</th>
+            <th>P&amp;L ₹</th><th>P&amp;L %</th>
+            <th>Exit Reason</th><th>Entry Reason</th>
           </tr>
         </thead>
-        <tbody id="mbt-daily-tbody"></tbody>
+        <tbody id="trade-tbody">
+          <tr><td colspan="12" class="empty-state">No paper trades yet. Start the engine to begin.</td></tr>
+        </tbody>
       </table>
     </div>
   </div>
 
-  <!-- Drill-down detail panel (shown when clicking a date) -->
-  <div id="mbt-detail" style="display:none;border:2px solid #dbeafe;border-radius:10px;padding:16px;background:#fafbff">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <div style="font-size:14px;font-weight:800;color:#1d4ed8" id="mbt-detail-title">—</div>
-      <button class="btn s-btn" style="padding:4px 12px;font-size:11px" onclick="closeMultiDetail()">✕ Close</button>
+  <!-- BOTTOM LINKS -->
+  <div class="grid2">
+    <div class="card">
+      <div class="card-title">📊 Portfolio</div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/profile">Profile</a></div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/holdings">Holdings</a></div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/positions">Positions</a></div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/orders">Orders</a></div>
+    </div>
+    <div class="card">
+      <div class="card-title">🔐 Auth &amp; Docs</div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/login">Login with Zerodha</a></div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/logout">Logout</a></div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/docs">Swagger UI</a></div>
+      <div class="lrow"><span class="mt mget">GET</span><a href="/redoc">ReDoc</a></div>
+    </div>
+  </div>
+
+</div><!-- /page-dashboard -->
+
+<!-- ═══ BACKTEST TAB ══════════════════════════════════════════════════════ -->
+<div id="page-backtest" class="page" style="display:none">
+
+  <!-- SINGLE DAY BACKTEST -->
+  <div class="card" id="backtest-card">
+    <div class="card-title">🔁 Strategy Backtest — Single Day</div>
+
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+      <div>
+        <label style="font-size:11px;color:#999;display:block;margin-bottom:3px">Select Date</label>
+        <input type="date" id="bt-date" style="padding:7px 10px;border:1px solid #ddd;border-radius:7px;font-size:13px;color:#222"/>
+      </div>
+      <div style="margin-top:18px">
+        <button class="btn b-btn" id="bt-btn" onclick="runBacktest()">▶ Run Backtest</button>
+      </div>
+    </div>
+    <p style="font-size:11px;color:#aaa;margin-bottom:10px">
+      Replays the VWAP+EMA strategy on historical Nifty 5-min data.
+      P&amp;L shown in Nifty index points — estimated options ₹ ≈ points × 0.5 × 75 lot.
+    </p>
+
+    <div id="bt-msg" style="display:none;padding:9px 13px;border-radius:8px;font-size:12px;margin-bottom:10px"></div>
+
+    <div id="bt-summary" style="display:none;margin-bottom:14px">
+      <div class="sum-grid" style="grid-template-columns:repeat(4,1fr)">
+        <div class="stat"><div class="lbl">Trades</div><div class="val b" id="bt-s-total">0</div></div>
+        <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="bt-s-wr">—</div></div>
+        <div class="stat"><div class="lbl">Total Points</div><div class="val" id="bt-s-pts">—</div></div>
+        <div class="stat"><div class="lbl">Avg Win / Loss pts</div><div class="val" id="bt-s-avg">—</div></div>
+      </div>
     </div>
 
-    <!-- Detail summary -->
-    <div class="sum-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
-      <div class="stat"><div class="lbl">Trades</div><div class="val b" id="mbt-d-total">0</div></div>
-      <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="mbt-d-wr">—</div></div>
-      <div class="stat"><div class="lbl">Total Points</div><div class="val" id="mbt-d-pts">—</div></div>
-      <div class="stat"><div class="lbl">Est ₹</div><div class="val" id="mbt-d-rs">—</div></div>
-    </div>
-
-    <!-- Detail trades -->
-    <div id="mbt-d-trades" style="margin-bottom:14px">
-      <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">Trades</div>
+    <div id="bt-trades" style="display:none;margin-bottom:14px">
+      <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:8px">Trades</div>
       <div class="tbl-wrap">
         <table>
           <thead>
             <tr>
               <th>#</th><th>Signal</th>
-              <th>Entry</th><th>Entry Nifty</th><th>Entry Reason</th>
+              <th>Entry</th><th>Entry Nifty</th>
               <th>Exit</th><th>Exit Nifty</th>
-              <th>Nifty Pts</th><th>Est ₹</th><th>Exit Reason</th><th>Result</th>
+              <th>Nifty Pts</th><th>Est ₹ P&amp;L</th><th>Exit Reason</th><th>Result</th>
             </tr>
           </thead>
-          <tbody id="mbt-d-trade-tbody"></tbody>
+          <tbody id="bt-trade-tbody"></tbody>
         </table>
       </div>
     </div>
 
-    <!-- Detail candle timeline -->
-    <div id="mbt-d-candles">
-      <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">
+    <div id="bt-candles" style="display:none">
+      <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:8px">
         5-Min Candle Timeline
-        <span style="font-size:10px;font-weight:400;color:#aaa;margin-left:6px">highlighted = in trade</span>
+        <span style="font-size:10px;font-weight:400;color:#aaa;margin-left:6px">highlighted rows = active trade</span>
       </div>
       <div class="tbl-wrap" style="max-height:380px;overflow-y:auto">
         <table>
@@ -437,35 +429,304 @@ def root():
               <th>VWAP</th><th>EMA20</th><th>Market</th><th>Signal</th><th>Note</th>
             </tr>
           </thead>
-          <tbody id="mbt-d-candle-tbody"></tbody>
+          <tbody id="bt-candle-tbody"></tbody>
         </table>
       </div>
     </div>
   </div>
-</div>
 
-<!-- ── BOTTOM ROW ──────────────────────────────────────────────── -->
-<div class="grid2">
-  <div class="card">
-    <div class="card-title">📊 Portfolio</div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/profile">Profile</a></div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/holdings">Holdings</a></div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/positions">Positions</a></div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/orders">Orders</a></div>
+  <!-- MULTI-DAY BACKTEST -->
+  <div class="card" id="multi-bt-card">
+    <div class="card-title">📊 Multi-Day Backtest</div>
+
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:12px">
+      <div>
+        <label style="font-size:11px;color:#999;display:block;margin-bottom:3px">From Date</label>
+        <input type="date" id="mbt-from" style="padding:7px 10px;border:1px solid #ddd;border-radius:7px;font-size:13px;color:#222"/>
+      </div>
+      <div>
+        <label style="font-size:11px;color:#999;display:block;margin-bottom:3px">To Date</label>
+        <input type="date" id="mbt-to" style="padding:7px 10px;border:1px solid #ddd;border-radius:7px;font-size:13px;color:#222"/>
+      </div>
+      <div>
+        <button class="btn b-btn" id="mbt-btn" onclick="runMultiBacktest()">▶ Run Multi-Day</button>
+      </div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap">
+        <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(5)">5D</button>
+        <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(10)">10D</button>
+        <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(30)">30D</button>
+        <button class="btn s-btn" style="padding:5px 10px;font-size:11px" onclick="setMultiRange(60)">60D</button>
+      </div>
+    </div>
+    <p style="font-size:11px;color:#aaa;margin-bottom:10px">
+      Runs strategy on each trading day in the range. Click any date row to see full trade details + candle timeline. Max 90 days.
+    </p>
+
+    <div id="mbt-msg" style="display:none;padding:9px 13px;border-radius:8px;font-size:12px;margin-bottom:10px"></div>
+    <div id="mbt-progress" style="display:none;margin-bottom:10px">
+      <div style="background:#e2e8f0;border-radius:6px;height:6px;overflow:hidden">
+        <div id="mbt-progress-bar" style="width:0%;height:100%;background:#0070f3;border-radius:6px;transition:width .3s"></div>
+      </div>
+      <div style="font-size:11px;color:#888;margin-top:4px" id="mbt-progress-text"></div>
+    </div>
+
+    <div id="mbt-summary" style="display:none;margin-bottom:16px">
+      <div class="mbt-sum-grid">
+        <div class="stat"><div class="lbl">Trading Days</div><div class="val b" id="mbt-days">0</div></div>
+        <div class="stat"><div class="lbl">Total Trades</div><div class="val b" id="mbt-total">0</div></div>
+        <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="mbt-wr">—</div></div>
+        <div class="stat"><div class="lbl">Total P&amp;L</div><div class="val" id="mbt-pnl">—</div></div>
+        <div class="stat"><div class="lbl">Max Drawdown</div><div class="val r" id="mbt-dd">—</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px">
+        <div class="stat"><div class="lbl">Avg Win Pts</div><div class="val g" id="mbt-avgw">—</div></div>
+        <div class="stat"><div class="lbl">Avg Loss Pts</div><div class="val r" id="mbt-avgl">—</div></div>
+        <div class="stat"><div class="lbl">Best Day</div><div class="val g" id="mbt-best">—</div></div>
+        <div class="stat"><div class="lbl">Worst Day</div><div class="val r" id="mbt-worst">—</div></div>
+      </div>
+    </div>
+
+    <div id="mbt-daily" style="display:none;margin-bottom:14px">
+      <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:8px">
+        Day-by-Day Results
+        <span style="font-size:10px;font-weight:400;color:#aaa;margin-left:6px">click a row to see full details</span>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th><th>Day</th><th>Trades</th><th>Wins</th><th>Losses</th>
+              <th>Win Rate</th><th>Nifty Pts</th><th>Est ₹ P&amp;L</th><th>Cum. Pts</th>
+            </tr>
+          </thead>
+          <tbody id="mbt-daily-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="mbt-detail" style="display:none;border:2px solid #dbeafe;border-radius:10px;padding:16px;background:#fafbff">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:14px;font-weight:800;color:#1d4ed8" id="mbt-detail-title">—</div>
+        <button class="btn s-btn" style="padding:4px 12px;font-size:11px" onclick="closeMultiDetail()">✕ Close</button>
+      </div>
+      <div class="sum-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
+        <div class="stat"><div class="lbl">Trades</div><div class="val b" id="mbt-d-total">0</div></div>
+        <div class="stat"><div class="lbl">Win Rate</div><div class="val g" id="mbt-d-wr">—</div></div>
+        <div class="stat"><div class="lbl">Total Points</div><div class="val" id="mbt-d-pts">—</div></div>
+        <div class="stat"><div class="lbl">Est ₹</div><div class="val" id="mbt-d-rs">—</div></div>
+      </div>
+      <div id="mbt-d-trades" style="margin-bottom:14px">
+        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">Trades</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th>Signal</th>
+                <th>Entry</th><th>Entry Nifty</th><th>Entry Reason</th>
+                <th>Exit</th><th>Exit Nifty</th>
+                <th>Nifty Pts</th><th>Est ₹</th><th>Exit Reason</th><th>Result</th>
+              </tr>
+            </thead>
+            <tbody id="mbt-d-trade-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="mbt-d-candles">
+        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">
+          5-Min Candle Timeline
+          <span style="font-size:10px;font-weight:400;color:#aaa;margin-left:6px">highlighted = in trade</span>
+        </div>
+        <div class="tbl-wrap" style="max-height:380px;overflow-y:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Open</th><th>High</th><th>Low</th><th>Close</th>
+                <th>VWAP</th><th>EMA20</th><th>Market</th><th>Signal</th><th>Note</th>
+              </tr>
+            </thead>
+            <tbody id="mbt-d-candle-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="card">
-    <div class="card-title">🔐 Auth &amp; Docs</div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/login">Login with Zerodha</a></div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/logout">Logout</a></div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/docs">Swagger UI</a></div>
-    <div class="lrow"><span class="mt mget">GET</span><a href="/redoc">ReDoc</a></div>
-  </div>
-</div>
+
+</div><!-- /page-backtest -->
 
 <script>
+/* ══════════════════════════════════════════════════════════════
+   TABS
+══════════════════════════════════════════════════════════════ */
+function switchTab(tab) {
+  ['dashboard','backtest'].forEach(t => {
+    document.getElementById('page-'+t).style.display = t===tab ? '' : 'none';
+    document.getElementById('tab-btn-'+t).classList.toggle('active', t===tab);
+  });
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CHART
+══════════════════════════════════════════════════════════════ */
+let mainChart = null, rsiChart = null;
+let candleSeries = null, vwapSeries = null, emaSeries = null;
+let rsiSeries = null, rsiObSeries = null, rsiOsSeries = null;
+let chartReady = false;
+let syncingRange = false;
+
+function initChart() {
+  if (chartReady) return;
+
+  const mainEl = document.getElementById('chart-container');
+  const rsiEl  = document.getElementById('rsi-container');
+
+  const chartOpts = {
+    layout: { background: { color: '#fff' }, textColor: '#333' },
+    grid:   { vertLines: { color: '#f1f5f9' }, horzLines: { color: '#f1f5f9' } },
+    crosshair: { mode: 1 },
+    rightPriceScale: { borderColor: '#e2e8f0', scaleMargins: { top: 0.08, bottom: 0.08 } },
+    timeScale: { borderColor: '#e2e8f0', timeVisible: true, secondsVisible: false },
+    handleScroll: true,
+    handleScale: true,
+  };
+
+  mainChart = LightweightCharts.createChart(mainEl, { ...chartOpts, height: 380 });
+  rsiChart  = LightweightCharts.createChart(rsiEl,  {
+    ...chartOpts, height: 110,
+    layout: { background: { color: '#fafbff' }, textColor: '#555' },
+    rightPriceScale: { borderColor: '#e2e8f0', scaleMargins: { top: 0.1, bottom: 0.1 } },
+  });
+
+  candleSeries = mainChart.addCandlestickSeries({
+    upColor: '#22c55e', downColor: '#ef4444',
+    borderUpColor: '#16a34a', borderDownColor: '#dc2626',
+    wickUpColor: '#16a34a', wickDownColor: '#dc2626',
+  });
+
+  vwapSeries = mainChart.addLineSeries({
+    color: '#f59e0b', lineWidth: 2, title: 'VWAP',
+    lastValueVisible: true, priceLineVisible: false,
+  });
+
+  emaSeries = mainChart.addLineSeries({
+    color: '#0070f3', lineWidth: 2, title: 'EMA20',
+    lastValueVisible: true, priceLineVisible: false,
+  });
+
+  rsiSeries = rsiChart.addLineSeries({
+    color: '#7c3aed', lineWidth: 2, title: 'RSI14',
+    lastValueVisible: true, priceLineVisible: false,
+  });
+
+  rsiObSeries = rsiChart.addLineSeries({
+    color: '#ef4444', lineWidth: 1, lineStyle: 2, // dashed
+    lastValueVisible: false, priceLineVisible: false,
+  });
+
+  rsiOsSeries = rsiChart.addLineSeries({
+    color: '#22c55e', lineWidth: 1, lineStyle: 2,
+    lastValueVisible: false, priceLineVisible: false,
+  });
+
+  // Sync scroll/zoom between main chart and RSI
+  mainChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (syncingRange || !range) return;
+    syncingRange = true;
+    rsiChart.timeScale().setVisibleLogicalRange(range);
+    syncingRange = false;
+  });
+  rsiChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    if (syncingRange || !range) return;
+    syncingRange = true;
+    mainChart.timeScale().setVisibleLogicalRange(range);
+    syncingRange = false;
+  });
+
+  // Resize observer
+  const ro = new ResizeObserver(() => {
+    const w = mainEl.clientWidth;
+    if (w > 0) {
+      mainChart.applyOptions({ width: w });
+      rsiChart.applyOptions({ width: w });
+    }
+  });
+  ro.observe(mainEl);
+
+  chartReady = true;
+  document.getElementById('chart-empty').style.display = 'none';
+  document.getElementById('chart-wrap').style.display = 'block';
+  document.getElementById('chart-legend').style.display = 'flex';
+}
+
+function updateChart(candles, status) {
+  if (!candles || candles.length === 0) return;
+
+  initChart();
+
+  const todayCandles = candles.filter(c => c.is_today);
+  if (todayCandles.length === 0) return;
+
+  // OHLCV — today only
+  const ohlc = todayCandles.map(c => ({
+    time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+  }));
+  candleSeries.setData(ohlc);
+
+  // VWAP — today only, filter nulls
+  const vwapData = todayCandles
+    .filter(c => c.vwap != null)
+    .map(c => ({ time: c.time, value: c.vwap }));
+  vwapSeries.setData(vwapData);
+
+  // EMA20 — today only, filter nulls
+  const emaData = todayCandles
+    .filter(c => c.ema20 != null)
+    .map(c => ({ time: c.time, value: c.ema20 }));
+  emaSeries.setData(emaData);
+
+  // RSI — today only, filter nulls
+  const rsiData = todayCandles
+    .filter(c => c.rsi14 != null)
+    .map(c => ({ time: c.time, value: c.rsi14 }));
+  rsiSeries.setData(rsiData);
+
+  // RSI OB/OS horizontal reference lines
+  if (rsiData.length >= 2) {
+    const tFirst = rsiData[0].time;
+    const tLast  = rsiData[rsiData.length - 1].time;
+    rsiObSeries.setData([{ time: tFirst, value: 70 }, { time: tLast, value: 70 }]);
+    rsiOsSeries.setData([{ time: tFirst, value: 30 }, { time: tLast, value: 30 }]);
+  }
+
+  // Entry marker for open position
+  if (status && status.position && status.position.entry_time) {
+    const entryHHMM = status.position.entry_time.slice(0, 5); // "HH:MM"
+    const optType   = status.position.option_type;
+    const markerCandle = todayCandles.find(c => {
+      const d = new Date(c.time * 1000);
+      const hh = d.getUTCHours().toString().padStart(2,'0');
+      const mm = d.getUTCMinutes().toString().padStart(2,'0');
+      return (hh+':'+mm) === entryHHMM;
+    });
+    if (markerCandle) {
+      candleSeries.setMarkers([{
+        time:     markerCandle.time,
+        position: optType === 'CE' ? 'belowBar' : 'aboveBar',
+        color:    optType === 'CE' ? '#16a34a' : '#dc2626',
+        shape:    optType === 'CE' ? 'arrowUp'  : 'arrowDown',
+        text:     'ENTRY',
+        size:     1,
+      }]);
+    }
+  } else {
+    candleSeries.setMarkers([]);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ENGINE CONTROL
+══════════════════════════════════════════════════════════════ */
 let autoRefresh = null;
 
-/* ── ENGINE ──────────────────────────────────────────────────── */
 async function startEngine() {
   setMsg('Starting engine...','');
   setBtns(true);
@@ -477,6 +738,7 @@ async function startEngine() {
     document.getElementById('btn-start').disabled=true;
     document.getElementById('btn-stop').disabled=false;
     startAutoRefresh();
+    await refreshAll();
   } catch(e){setMsg('Network error: '+e,'err');setBtns(false);}
 }
 
@@ -492,15 +754,20 @@ async function stopEngine() {
     document.getElementById('btn-stop').disabled=true;
     stopAutoRefresh();
   } catch(e){setMsg('Error: '+e,'err');}
-  await refreshStatus();
+  await refreshAll();
   loadTrades();
 }
 
-async function refreshStatus() {
+async function refreshAll() {
   try {
-    const r = await fetch('/auto-trading/status');
-    const d = await r.json();
-    updateEngineUI(d);
+    const [sResp, cResp] = await Promise.all([
+      fetch('/auto-trading/status'),
+      fetch('/auto-trading/candles'),
+    ]);
+    const status     = await sResp.json();
+    const candleData = await cResp.json();
+    updateEngineUI(status);
+    updateChart(candleData.candles, status);
   } catch(e){}
 }
 
@@ -511,6 +778,10 @@ function updateEngineUI(d) {
   document.getElementById('candle-info').textContent = 'Candles: '+d.candle_count+' / '+d.candles_needed;
   document.getElementById('market-state-top').textContent = 'Market: '+(d.market_state||'—');
 
+  if(d.instruments && d.instruments.atm_strike) {
+    document.getElementById('atm-info').textContent = 'ATM: '+d.instruments.atm_strike;
+  }
+
   const badge = document.getElementById('mode-badge');
   badge.textContent = d.mode||'PAPER';
   badge.className = 'badge '+(d.mode==='LIVE'?'bl':'bp');
@@ -518,39 +789,63 @@ function updateEngineUI(d) {
   document.getElementById('btn-start').disabled = d.engine_running;
   document.getElementById('btn-stop').disabled  = !d.engine_running;
 
-  // Resume auto-refresh on page reload if engine is already running
   if(d.engine_running && !autoRefresh) startAutoRefresh();
   else if(!d.engine_running && autoRefresh) stopAutoRefresh();
 
-  const liveGrid = document.getElementById('live-grid');
-  if(d.engine_running || d.nifty_spot>0) {
-    liveGrid.style.display='grid';
-    document.getElementById('nifty-spot').textContent    = d.nifty_spot>0 ? d.nifty_spot.toFixed(1) : '—';
-    document.getElementById('nifty-futures').textContent = d.nifty_futures_ltp>0 ? d.nifty_futures_ltp.toFixed(1) : '—';
-    document.getElementById('ce-ltp').textContent      = d.ce_ltp>0 ? '₹'+d.ce_ltp.toFixed(2) : '—';
-    document.getElementById('pe-ltp').textContent      = d.pe_ltp>0 ? '₹'+d.pe_ltp.toFixed(2) : '—';
-    document.getElementById('last-signal').textContent = d.last_signal||'—';
-    document.getElementById('last-candle').textContent = d.last_candle_time||'—';
-    document.getElementById('exit-reason').textContent = d.exit_reason||'—';
-    // Show ATM option symbols
+  const show = d.engine_running || d.nifty_spot > 0;
+  document.getElementById('mstrip').style.display = show ? 'grid' : 'none';
+  document.getElementById('istrip').style.display = show ? 'grid' : 'none';
+
+  if(show) {
+    document.getElementById('m-spot').textContent = d.nifty_spot>0 ? d.nifty_spot.toFixed(2) : '—';
+    document.getElementById('m-fut').textContent  = d.nifty_futures_ltp>0 ? d.nifty_futures_ltp.toFixed(2) : '—';
+    document.getElementById('m-ce').textContent   = d.ce_ltp>0 ? '₹'+d.ce_ltp.toFixed(2) : '—';
+    document.getElementById('m-pe').textContent   = d.pe_ltp>0 ? '₹'+d.pe_ltp.toFixed(2) : '—';
     if(d.instruments) {
-      document.getElementById('ce-sym').textContent = d.instruments.ce || '—';
-      document.getElementById('pe-sym').textContent = d.instruments.pe || '—';
+      document.getElementById('m-ce-sym').textContent = d.instruments.ce||'—';
+      document.getElementById('m-pe-sym').textContent = d.instruments.pe||'—';
     }
+
+    // Indicators
+    const ind = d.indicators || {};
+    document.getElementById('i-vwap').textContent  = ind.vwap ? ind.vwap.toFixed(2) : '—';
+    document.getElementById('i-ema').textContent   = ind.ema20 ? ind.ema20.toFixed(2) : '—';
+
+    const rsiEl = document.getElementById('i-rsi');
+    if(ind.rsi14 != null) {
+      rsiEl.textContent = ind.rsi14.toFixed(1);
+      rsiEl.style.color = ind.rsi14 >= 70 ? '#dc2626' : ind.rsi14 <= 30 ? '#16a34a' : '#7c3aed';
+    } else {
+      rsiEl.textContent = '—';
+    }
+
+    const volEl = document.getElementById('i-vol');
+    if(ind.volume_surge != null) {
+      volEl.textContent = ind.volume_surge ? 'YES' : 'NO';
+      volEl.style.color = ind.volume_surge ? '#16a34a' : '#ef4444';
+    } else {
+      volEl.textContent = '—'; volEl.style.color = '#111';
+    }
+
+    const sigEl = document.getElementById('i-sig');
+    const sig = d.last_signal || '—';
+    sigEl.textContent = sig;
+    sigEl.style.color = sig==='BUY_CE'?'#0369a1':sig==='BUY_PE'?'#9d174d':sig==='NO_SIGNAL'?'#888':'#111';
+
+    document.getElementById('i-candle').textContent = d.last_candle_time||'—';
   }
 
-  // Open position banner
+  // Position banner
   const banner = document.getElementById('pos-banner');
   if(d.position) {
     banner.style.display='block';
     const p = d.position;
     const pnl = d.pnl;
     document.getElementById('pos-sym').textContent = p.symbol;
-    document.getElementById('pos-meta').textContent = p.option_type+' · Strike '+p.strike+' · Expiry '+p.expiry+' · Qty '+p.qty;
-    const slInfo = p.trail_active
-      ? 'Trail SL: ₹'+p.trailing_sl+' (trailing active)'
-      : 'SL: ₹'+p.trailing_sl;
-    document.getElementById('pos-sl').textContent = slInfo;
+    document.getElementById('pos-meta').textContent =
+      p.option_type+' · Strike '+p.strike+' · Expiry '+p.expiry+' · Qty '+p.qty;
+    document.getElementById('pos-sl').textContent =
+      p.trail_active ? 'Trail SL: ₹'+p.trailing_sl+' (trailing active)' : 'SL: ₹'+p.trailing_sl;
     document.getElementById('pos-entry').textContent = 'Entry: ₹'+p.entry_price+' @ '+p.entry_time;
     if(pnl) {
       const sign = pnl.pnl_rupees>=0?'+':'';
@@ -563,7 +858,9 @@ function updateEngineUI(d) {
   }
 }
 
-/* ── PAPER TRADE LOG ────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   PAPER TRADE LOG
+══════════════════════════════════════════════════════════════ */
 async function loadTrades() {
   try {
     const r = await fetch('/auto-trading/paper-log');
@@ -574,10 +871,7 @@ async function loadTrades() {
 }
 
 function renderSummary(s) {
-  if(!s || s.total_trades===0) {
-    document.getElementById('sum-grid').style.display='none';
-    return;
-  }
+  if(!s || s.total_trades===0){ document.getElementById('sum-grid').style.display='none'; return; }
   document.getElementById('sum-grid').style.display='grid';
   document.getElementById('s-total').textContent = s.total_trades;
   document.getElementById('s-wr').textContent = s.win_rate_pct+'%';
@@ -590,46 +884,47 @@ function renderSummary(s) {
 
 function renderTrades(trades) {
   const tbody = document.getElementById('trade-tbody');
-  if(!trades || trades.length===0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No paper trades yet. Start the engine to begin.</td></tr>';
+  if(!trades||trades.length===0){
+    tbody.innerHTML='<tr><td colspan="12" class="empty-state">No paper trades yet.</td></tr>';
     return;
   }
-  // Show latest trades first
-  const rows = [...trades].reverse().map((t,i) => {
-    const pnl   = parseFloat(t.pnl_rupees||0);
-    const pnlPct= parseFloat(t.pnl_pct||0);
-    const sign  = pnl>=0?'+':'';
+  const rows = [...trades].reverse().map(t => {
+    const pnl  = parseFloat(t.pnl_rupees||0);
+    const pct  = parseFloat(t.pnl_pct||0);
+    const sign = pnl>=0?'+':'';
     const typeP = t.option_type==='CE'
-      ? '<span class="pill pill-ce">CE</span>'
-      : '<span class="pill pill-pe">PE</span>';
+      ?'<span class="pill pill-ce">CE</span>'
+      :'<span class="pill pill-pe">PE</span>';
     const pnlP  = pnl>=0
-      ? '<span class="pill pill-win">'+sign+'₹'+pnl+'</span>'
-      : '<span class="pill pill-loss">₹'+pnl+'</span>';
+      ?'<span class="pill pill-win">'+sign+'₹'+pnl+'</span>'
+      :'<span class="pill pill-loss">₹'+pnl+'</span>';
     const pctP  = pnl>=0
-      ? '<span style="color:#16a34a;font-weight:700">'+sign+pnlPct+'%</span>'
-      : '<span style="color:#dc2626;font-weight:700">'+pnlPct+'%</span>';
-    const exitP = '<span class="pill pill-exit">'+t.reason_for_exit+'</span>';
-    const sym   = '<span style="font-weight:600;font-size:11px">'+t.option_symbol+'</span>';
-    const entryReason = t.reason_for_entry ? '<span title="'+t.reason_for_entry+'" style="cursor:help;color:#888">ℹ hover</span>' : '—';
+      ?'<span style="color:#16a34a;font-weight:700">'+sign+pct+'%</span>'
+      :'<span style="color:#dc2626;font-weight:700">'+pct+'%</span>';
+    const entryR = t.reason_for_entry
+      ?'<span title="'+t.reason_for_entry+'" style="cursor:help;color:#888">ℹ hover</span>'
+      :'—';
     return '<tr>'
       +'<td>'+t.trade_number+'</td>'
       +'<td>'+t.date+'</td>'
       +'<td>'+typeP+'</td>'
-      +'<td>'+sym+'</td>'
+      +'<td style="font-weight:600;font-size:11px">'+t.option_symbol+'</td>'
       +'<td>'+t.entry_time+'</td>'
       +'<td>₹'+t.entry_price+'</td>'
       +'<td>'+t.exit_time+'</td>'
       +'<td>₹'+t.exit_price+'</td>'
       +'<td>'+pnlP+'</td>'
       +'<td>'+pctP+'</td>'
-      +'<td>'+exitP+'</td>'
-      +'<td>'+entryReason+'</td>'
+      +'<td><span class="pill pill-exit">'+t.reason_for_exit+'</span></td>'
+      +'<td>'+entryR+'</td>'
       +'</tr>';
   }).join('');
   tbody.innerHTML = rows;
 }
 
-/* ── HELPERS ─────────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   HELPERS
+══════════════════════════════════════════════════════════════ */
 function setMsg(text,type) {
   const el=document.getElementById('msg');
   el.textContent=text;
@@ -642,347 +937,226 @@ function setBtns(dis) {
 }
 function startAutoRefresh() {
   if(autoRefresh) clearInterval(autoRefresh);
-  autoRefresh = setInterval(()=>{refreshStatus();loadTrades();},5000);
+  autoRefresh = setInterval(()=>{refreshAll();loadTrades();},5000);
 }
 function stopAutoRefresh() {
   if(autoRefresh){clearInterval(autoRefresh);autoRefresh=null;}
 }
 
-/* ── BACKTEST ────────────────────────────────────────────────── */
-function localDateStr(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth()+1).padStart(2,'0');
-  const d = String(date.getDate()).padStart(2,'0');
-  return `${y}-${m}-${d}`;
+/* ══════════════════════════════════════════════════════════════
+   BACKTEST — SINGLE DAY
+══════════════════════════════════════════════════════════════ */
+function localDateStr(d) {
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 }
-
 (function initDatePicker(){
   const inp = document.getElementById('bt-date');
   const d = new Date(); d.setDate(d.getDate()-1);
-  inp.value = localDateStr(d);
-  inp.max   = localDateStr(d);
+  inp.value = localDateStr(d); inp.max = localDateStr(d);
 })();
 
 async function runBacktest() {
   const dateVal = document.getElementById('bt-date').value;
   if(!dateVal){btMsg('Please select a date','err');return;}
-
   const btn = document.getElementById('bt-btn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Running…';
+  btn.disabled=true; btn.textContent='⏳ Running…';
   btMsg('Fetching historical data and replaying strategy…','info');
-
-  // Hide old results
   ['bt-summary','bt-trades','bt-candles'].forEach(id=>document.getElementById(id).style.display='none');
-
   try {
-    const r = await fetch('/backtest/run',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({date:dateVal}),
-    });
+    const r = await fetch('/backtest/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:dateVal})});
     const d = await r.json();
     if(!r.ok){btMsg(d.detail||'Error running backtest','err');return;}
     btMsg('','');
     renderBacktest(d);
-  } catch(e){
-    btMsg('Network error: '+e,'err');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '▶ Run Backtest';
-  }
+  } catch(e){btMsg('Network error: '+e,'err');}
+  finally{btn.disabled=false;btn.textContent='▶ Run Backtest';}
 }
 
 function renderBacktest(d) {
   const s = d.summary;
-
-  // Summary
   document.getElementById('bt-summary').style.display='block';
   document.getElementById('bt-s-total').textContent = s.total_trades;
   document.getElementById('bt-s-wr').textContent = s.win_rate_pct+'%';
-  const ptsEl = document.getElementById('bt-s-pts');
-  const estRs = s.total_est_rs || 0;
-  ptsEl.textContent = (s.total_points>=0?'+':'')+s.total_points+' pts  ('+(estRs>=0?'+':'')+'₹'+estRs+')';
-  ptsEl.className = 'val '+(s.total_points>=0?'g':'r');
-  document.getElementById('bt-s-avg').textContent = '+'+s.avg_win_points+' / '+s.avg_loss_points;
+  const ptsEl=document.getElementById('bt-s-pts');
+  const estRs=s.total_est_rs||0;
+  ptsEl.textContent=(s.total_points>=0?'+':'')+s.total_points+' pts ('+(estRs>=0?'+':'')+'₹'+estRs+')';
+  ptsEl.className='val '+(s.total_points>=0?'g':'r');
+  document.getElementById('bt-s-avg').textContent='+'+s.avg_win_points+' / '+s.avg_loss_points;
 
-  // Trade table
-  if(d.trades && d.trades.length>0){
+  if(d.trades&&d.trades.length>0){
     document.getElementById('bt-trades').style.display='block';
-    const rows = d.trades.map(t=>{
-      const sign = t.points>=0?'+':'';
-      const sigPill = t.signal==='BUY_CE'
-        ?'<span class="pill pill-ce">CE</span>'
-        :'<span class="pill pill-pe">PE</span>';
-      const resPill = t.result==='WIN'
-        ?'<span class="pill pill-win">WIN</span>'
-        :'<span class="pill pill-loss">LOSS</span>';
-      const ptColor = t.points>=0?'#16a34a':'#dc2626';
-      return '<tr>'
-        +'<td>'+t.num+'</td>'
-        +'<td>'+sigPill+'</td>'
-        +'<td>'+t.entry_time+'</td>'
-        +'<td>'+t.entry_nifty+'</td>'
-        +'<td>'+t.exit_time+'</td>'
-        +'<td>'+t.exit_nifty+'</td>'
+    document.getElementById('bt-trade-tbody').innerHTML=d.trades.map(t=>{
+      const sign=t.points>=0?'+':'';
+      const sigPill=t.signal==='BUY_CE'?'<span class="pill pill-ce">CE</span>':'<span class="pill pill-pe">PE</span>';
+      const resPill=t.result==='WIN'?'<span class="pill pill-win">WIN</span>':'<span class="pill pill-loss">LOSS</span>';
+      const ptColor=t.points>=0?'#16a34a':'#dc2626';
+      return '<tr><td>'+t.num+'</td><td>'+sigPill+'</td><td>'+t.entry_time+'</td><td>'+t.entry_nifty+'</td><td>'+t.exit_time+'</td><td>'+t.exit_nifty+'</td>'
         +'<td style="font-weight:700;color:'+ptColor+'">'+sign+t.points+' pts</td>'
         +'<td style="font-weight:700;color:'+ptColor+'">'+(t.est_options_pnl>=0?'+':'')+t.est_options_pnl+'</td>'
-        +'<td><span class="pill pill-exit">'+t.exit_reason+'</span></td>'
-        +'<td>'+resPill+'</td>'
-        +'</tr>';
+        +'<td><span class="pill pill-exit">'+t.exit_reason+'</span></td><td>'+resPill+'</td></tr>';
     }).join('');
-    document.getElementById('bt-trade-tbody').innerHTML = rows;
   }
 
-  // Candle timeline
-  if(d.candles && d.candles.length>0){
+  if(d.candles&&d.candles.length>0){
     document.getElementById('bt-candles').style.display='block';
-    const rows = d.candles.map(c=>{
-      const bg = c.in_trade ? 'background:#eff6ff' : '';
-      const sigColor = c.signal==='BUY_CE'?'#0369a1':c.signal==='BUY_PE'?'#9d174d':'#aaa';
-      const mktBadge = c.market_state==='TRENDING'
-        ?'<span style="color:#16a34a;font-weight:700;font-size:10px">▲ TREND</span>'
-        :c.market_state==='SIDEWAYS'
-        ?'<span style="color:#f59e0b;font-weight:700;font-size:10px">↔ SIDE</span>'
-        :'<span style="color:#aaa;font-size:10px">—</span>';
-      const noteStyle = c.note.startsWith('ENTRY')
-        ? 'color:#1d4ed8;font-weight:700'
-        : c.note.startsWith('EXIT')
-        ? 'color:#dc2626;font-weight:700'
-        : 'color:#888';
-      return '<tr style="'+bg+'">'
-        +'<td style="font-weight:600">'+c.time+'</td>'
-        +'<td>'+c.open+'</td>'
-        +'<td>'+c.high+'</td>'
-        +'<td>'+c.low+'</td>'
-        +'<td style="font-weight:600">'+c.close+'</td>'
-        +'<td>'+c.vwap+'</td>'
-        +'<td>'+(c.ema20||'—')+'</td>'
-        +'<td>'+mktBadge+'</td>'
-        +'<td style="color:'+sigColor+';font-weight:700;font-size:11px">'+c.signal+'</td>'
-        +'<td style="'+noteStyle+'">'+c.note+'</td>'
-        +'</tr>';
-    }).join('');
-    document.getElementById('bt-candle-tbody').innerHTML = rows;
+    document.getElementById('bt-candle-tbody').innerHTML=d.candles.map(c=>candleRow(c)).join('');
   }
 }
 
-function btMsg(text, type) {
-  const el = document.getElementById('bt-msg');
-  el.textContent = text;
-  el.style.display = text ? 'block' : 'none';
-  el.style.background = type==='err'?'#fee2e2':type==='info'?'#eff6ff':'#dcfce7';
-  el.style.color = type==='err'?'#991b1b':type==='info'?'#1e40af':'#166534';
+function candleRow(c) {
+  const bg=c.in_trade?'background:#eff6ff':'';
+  const sigColor=c.signal==='BUY_CE'?'#0369a1':c.signal==='BUY_PE'?'#9d174d':'#aaa';
+  const mktBadge=c.market_state==='TRENDING'
+    ?'<span style="color:#16a34a;font-weight:700;font-size:10px">▲ TREND</span>'
+    :c.market_state==='SIDEWAYS'
+    ?'<span style="color:#f59e0b;font-weight:700;font-size:10px">↔ SIDE</span>'
+    :'<span style="color:#aaa;font-size:10px">—</span>';
+  const noteStyle=c.note.startsWith('ENTRY')?'color:#1d4ed8;font-weight:700':c.note.startsWith('EXIT')?'color:#dc2626;font-weight:700':'color:#888';
+  return '<tr style="'+bg+'"><td style="font-weight:600">'+c.time+'</td><td>'+c.open+'</td><td>'+c.high+'</td><td>'+c.low+'</td>'
+    +'<td style="font-weight:600">'+c.close+'</td><td>'+c.vwap+'</td><td>'+(c.ema20||'—')+'</td><td>'+mktBadge+'</td>'
+    +'<td style="color:'+sigColor+';font-weight:700;font-size:11px">'+c.signal+'</td>'
+    +'<td style="'+noteStyle+'">'+c.note+'</td></tr>';
 }
 
-/* ── MULTI-DAY BACKTEST ─────────────────────────────────────── */
-let multiData = null;   // store full response for drill-down
+function btMsg(text,type){
+  const el=document.getElementById('bt-msg');
+  el.textContent=text; el.style.display=text?'block':'none';
+  el.style.background=type==='err'?'#fee2e2':type==='info'?'#eff6ff':'#dcfce7';
+  el.style.color=type==='err'?'#991b1b':type==='info'?'#1e40af':'#166534';
+}
+
+/* ══════════════════════════════════════════════════════════════
+   BACKTEST — MULTI DAY
+══════════════════════════════════════════════════════════════ */
+let multiData = null;
 
 (function initMultiDatePickers(){
-  const to = document.getElementById('mbt-to');
-  const fr = document.getElementById('mbt-from');
-  const d = new Date(); d.setDate(d.getDate()-1);
-  to.value = localDateStr(d);
-  to.max   = localDateStr(d);
-  const f = new Date(); f.setDate(f.getDate()-11);
-  fr.value = localDateStr(f);
-  fr.max   = localDateStr(d);
+  const to=document.getElementById('mbt-to');
+  const fr=document.getElementById('mbt-from');
+  const d=new Date(); d.setDate(d.getDate()-1);
+  to.value=localDateStr(d); to.max=localDateStr(d);
+  const f=new Date(); f.setDate(f.getDate()-11);
+  fr.value=localDateStr(f); fr.max=localDateStr(d);
 })();
 
 function setMultiRange(days){
-  const to = document.getElementById('mbt-to');
-  const fr = document.getElementById('mbt-from');
-  const d = new Date(); d.setDate(d.getDate()-1);
-  to.value = localDateStr(d);
-  const f = new Date(); f.setDate(f.getDate()-1-days);
-  fr.value = localDateStr(f);
+  const to=document.getElementById('mbt-to');
+  const fr=document.getElementById('mbt-from');
+  const d=new Date(); d.setDate(d.getDate()-1);
+  to.value=localDateStr(d);
+  const f=new Date(); f.setDate(f.getDate()-1-days);
+  fr.value=localDateStr(f);
 }
 
 async function runMultiBacktest(){
-  const fromVal = document.getElementById('mbt-from').value;
-  const toVal   = document.getElementById('mbt-to').value;
-  if(!fromVal || !toVal){mbtMsg('Select both dates','err');return;}
-
-  const btn = document.getElementById('mbt-btn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Running…';
+  const fromVal=document.getElementById('mbt-from').value;
+  const toVal=document.getElementById('mbt-to').value;
+  if(!fromVal||!toVal){mbtMsg('Select both dates','err');return;}
+  const btn=document.getElementById('mbt-btn');
+  btn.disabled=true; btn.textContent='⏳ Running…';
   mbtMsg('Fetching data & replaying strategy for each trading day…','info');
   document.getElementById('mbt-progress').style.display='block';
   document.getElementById('mbt-progress-bar').style.width='10%';
   document.getElementById('mbt-progress-text').textContent='Connecting to Kite API…';
-
   ['mbt-summary','mbt-daily','mbt-detail'].forEach(id=>document.getElementById(id).style.display='none');
-
   try{
-    const r = await fetch('/backtest/run-multi',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({from_date:fromVal, to_date:toVal}),
-    });
-    const d = await r.json();
+    const r=await fetch('/backtest/run-multi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from_date:fromVal,to_date:toVal})});
+    const d=await r.json();
     if(!r.ok){mbtMsg(d.detail||'Error','err');return;}
     document.getElementById('mbt-progress-bar').style.width='100%';
     document.getElementById('mbt-progress-text').textContent='Done!';
     setTimeout(()=>{document.getElementById('mbt-progress').style.display='none';},800);
     mbtMsg('','');
-    multiData = d;
+    multiData=d;
     renderMultiBacktest(d);
-  }catch(e){
-    mbtMsg('Network error: '+e,'err');
-  }finally{
-    btn.disabled=false;
-    btn.textContent='▶ Run Multi-Day';
-  }
+  }catch(e){mbtMsg('Network error: '+e,'err');}
+  finally{btn.disabled=false;btn.textContent='▶ Run Multi-Day';}
 }
 
 function renderMultiBacktest(d){
-  const a = d.aggregate;
-
-  // Summary
+  const a=d.aggregate;
   document.getElementById('mbt-summary').style.display='block';
-  document.getElementById('mbt-days').textContent = d.trading_days;
-  document.getElementById('mbt-total').textContent = a.total_trades;
-  document.getElementById('mbt-wr').textContent = a.win_rate_pct+'%';
+  document.getElementById('mbt-days').textContent=d.trading_days;
+  document.getElementById('mbt-total').textContent=a.total_trades;
+  document.getElementById('mbt-wr').textContent=a.win_rate_pct+'%';
+  const pnlEl=document.getElementById('mbt-pnl');
+  const sign=a.total_points>=0?'+':'';
+  pnlEl.textContent=sign+a.total_points+' pts ('+(a.total_est_rs>=0?'+':'')+'₹'+a.total_est_rs+')';
+  pnlEl.className='val '+(a.total_points>=0?'g':'r');
+  document.getElementById('mbt-dd').textContent='-'+a.max_drawdown_pts+' pts';
+  document.getElementById('mbt-avgw').textContent='+'+a.avg_win_points;
+  document.getElementById('mbt-avgl').textContent=a.avg_loss_points;
+  document.getElementById('mbt-best').textContent=a.best_day+' (+'+a.best_day_pts+')';
+  document.getElementById('mbt-worst').textContent=a.worst_day+' ('+a.worst_day_pts+')';
 
-  const pnlEl = document.getElementById('mbt-pnl');
-  const sign = a.total_points>=0?'+':'';
-  pnlEl.textContent = sign+a.total_points+' pts ('+(a.total_est_rs>=0?'+':'')+'₹'+a.total_est_rs+')';
-  pnlEl.className = 'val '+(a.total_points>=0?'g':'r');
-
-  document.getElementById('mbt-dd').textContent = '-'+a.max_drawdown_pts+' pts';
-  document.getElementById('mbt-avgw').textContent = '+'+a.avg_win_points;
-  document.getElementById('mbt-avgl').textContent = a.avg_loss_points;
-  document.getElementById('mbt-best').textContent = a.best_day+' (+'+a.best_day_pts+')';
-  document.getElementById('mbt-worst').textContent = a.worst_day+' ('+a.worst_day_pts+')';
-
-  // Daily table
-  if(d.daily && d.daily.length>0){
+  if(d.daily&&d.daily.length>0){
     document.getElementById('mbt-daily').style.display='block';
-    const dow = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    let cumPts = 0;
-    const maxAbsCum = Math.max(...d.daily.reduce((acc,day)=>{cumPts+=day.total_points;acc.push(Math.abs(cumPts));return acc;},[]),1);
-    cumPts = 0;
-
-    const rows = d.daily.map((day, idx)=>{
-      cumPts += day.total_points;
-      const dt = new Date(day.date+'T00:00:00');
-      const dayName = dow[dt.getDay()];
-      const ptSign = day.total_points>=0?'+':'';
-      const ptColor = day.total_points>=0?'#16a34a':'#dc2626';
-      const rsSign = day.total_est_rs>=0?'+':'';
-      const rsColor = day.total_est_rs>=0?'#16a34a':'#dc2626';
-      const cumSign = cumPts>=0?'+':'';
-      const cumColor = cumPts>=0?'#16a34a':'#dc2626';
-      const barW = Math.max(2, Math.abs(cumPts)/maxAbsCum*60);
-      const barColor = cumPts>=0?'#22c55e':'#ef4444';
-      const wrColor = day.win_rate_pct>=50?'#16a34a':day.win_rate_pct>0?'#f59e0b':'#dc2626';
-
+    const dow=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    let cumPts=0;
+    const maxAbsCum=Math.max(...d.daily.reduce((acc,day)=>{cumPts+=day.total_points;acc.push(Math.abs(cumPts));return acc;},[]),1);
+    cumPts=0;
+    document.getElementById('mbt-daily-tbody').innerHTML=d.daily.map((day,idx)=>{
+      cumPts+=day.total_points;
+      const dt=new Date(day.date+'T00:00:00');
+      const dayName=dow[dt.getDay()];
+      const ptColor=day.total_points>=0?'#16a34a':'#dc2626';
+      const rsColor=day.total_est_rs>=0?'#16a34a':'#dc2626';
+      const cumColor=cumPts>=0?'#16a34a':'#dc2626';
+      const barW=Math.max(2,Math.abs(cumPts)/maxAbsCum*60);
+      const barColor=cumPts>=0?'#22c55e':'#ef4444';
+      const wrColor=day.win_rate_pct>=50?'#16a34a':day.win_rate_pct>0?'#f59e0b':'#dc2626';
       return '<tr class="mbt-row" data-idx="'+idx+'" onclick="showMultiDetail('+idx+')">'
-        +'<td style="font-weight:600">'+day.date+'</td>'
-        +'<td>'+dayName+'</td>'
+        +'<td style="font-weight:600">'+day.date+'</td><td>'+dayName+'</td>'
         +'<td>'+day.total_trades+'</td>'
         +'<td style="color:#16a34a">'+day.wins+'</td>'
         +'<td style="color:#dc2626">'+day.losses+'</td>'
         +'<td style="color:'+wrColor+';font-weight:700">'+day.win_rate_pct+'%</td>'
-        +'<td style="font-weight:700;color:'+ptColor+'">'+ptSign+day.total_points+'</td>'
-        +'<td style="color:'+rsColor+'">'+rsSign+'₹'+day.total_est_rs+'</td>'
-        +'<td><span style="color:'+cumColor+';font-weight:700;margin-right:6px">'+cumSign+cumPts.toFixed(1)+'</span>'
-        +'<span class="cum-bar" style="width:'+barW+'px;background:'+barColor+'"></span></td>'
-        +'</tr>';
+        +'<td style="font-weight:700;color:'+ptColor+'">'+(day.total_points>=0?'+':'')+day.total_points+'</td>'
+        +'<td style="color:'+rsColor+'">'+(day.total_est_rs>=0?'+':'')+'₹'+day.total_est_rs+'</td>'
+        +'<td><span style="color:'+cumColor+';font-weight:700;margin-right:6px">'+(cumPts>=0?'+':'')+cumPts.toFixed(1)+'</span>'
+        +'<span class="cum-bar" style="width:'+barW+'px;background:'+barColor+'"></span></td></tr>';
     }).join('');
-    document.getElementById('mbt-daily-tbody').innerHTML = rows;
   }
 }
 
 function showMultiDetail(idx){
-  if(!multiData || !multiData.daily[idx]) return;
-  const day = multiData.daily[idx];
-
-  // Highlight active row
+  if(!multiData||!multiData.daily[idx]) return;
+  const day=multiData.daily[idx];
   document.querySelectorAll('tr.mbt-row').forEach(r=>r.classList.remove('active'));
-  const activeRow = document.querySelector('tr.mbt-row[data-idx="'+idx+'"]');
+  const activeRow=document.querySelector('tr.mbt-row[data-idx="'+idx+'"]');
   if(activeRow) activeRow.classList.add('active');
-
   document.getElementById('mbt-detail').style.display='block';
-  document.getElementById('mbt-detail-title').textContent = '📅 '+day.date+' — Detailed View';
+  document.getElementById('mbt-detail-title').textContent='📅 '+day.date+' — Detailed View';
+  document.getElementById('mbt-d-total').textContent=day.total_trades;
+  document.getElementById('mbt-d-wr').textContent=day.win_rate_pct+'%';
+  const ptsEl=document.getElementById('mbt-d-pts');
+  ptsEl.textContent=(day.total_points>=0?'+':'')+day.total_points+' pts';
+  ptsEl.className='val '+(day.total_points>=0?'g':'r');
+  const rsEl=document.getElementById('mbt-d-rs');
+  rsEl.textContent=(day.total_est_rs>=0?'+':'')+'₹'+day.total_est_rs;
+  rsEl.className='val '+(day.total_est_rs>=0?'g':'r');
 
-  // Summary
-  document.getElementById('mbt-d-total').textContent = day.total_trades;
-  document.getElementById('mbt-d-wr').textContent = day.win_rate_pct+'%';
-  const ptsEl = document.getElementById('mbt-d-pts');
-  ptsEl.textContent = (day.total_points>=0?'+':'')+day.total_points+' pts';
-  ptsEl.className = 'val '+(day.total_points>=0?'g':'r');
-  const rsEl = document.getElementById('mbt-d-rs');
-  rsEl.textContent = (day.total_est_rs>=0?'+':'')+'₹'+day.total_est_rs;
-  rsEl.className = 'val '+(day.total_est_rs>=0?'g':'r');
+  document.getElementById('mbt-d-trade-tbody').innerHTML=(day.trades&&day.trades.length>0)
+    ? day.trades.map(t=>{
+        const sign=t.points>=0?'+':'';
+        const sigPill=t.signal==='BUY_CE'?'<span class="pill pill-ce">CE</span>':'<span class="pill pill-pe">PE</span>';
+        const resPill=t.result==='WIN'?'<span class="pill pill-win">WIN</span>':'<span class="pill pill-loss">LOSS</span>';
+        const ptColor=t.points>=0?'#16a34a':'#dc2626';
+        const reason=t.entry_reason||'—';
+        const shortReason=reason.length>40?'<span title="'+reason.replace(/"/g,'&quot;')+'" style="cursor:help">'+reason.slice(0,38)+'…</span>':reason;
+        return '<tr><td>'+t.num+'</td><td>'+sigPill+'</td><td>'+t.entry_time+'</td><td>'+t.entry_nifty+'</td>'
+          +'<td style="font-size:11px;color:#666">'+shortReason+'</td>'
+          +'<td>'+t.exit_time+'</td><td>'+t.exit_nifty+'</td>'
+          +'<td style="font-weight:700;color:'+ptColor+'">'+sign+t.points+' pts</td>'
+          +'<td style="font-weight:700;color:'+ptColor+'">'+(t.est_options_pnl>=0?'+':'')+t.est_options_pnl+'</td>'
+          +'<td><span class="pill pill-exit">'+t.exit_reason+'</span></td><td>'+resPill+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="11" class="empty-state">No trades on this day</td></tr>';
 
-  // Trade table
-  if(day.trades && day.trades.length>0){
-    document.getElementById('mbt-d-trades').style.display='block';
-    const rows = day.trades.map(t=>{
-      const sign = t.points>=0?'+':'';
-      const sigPill = t.signal==='BUY_CE'
-        ?'<span class="pill pill-ce">CE</span>'
-        :'<span class="pill pill-pe">PE</span>';
-      const resPill = t.result==='WIN'
-        ?'<span class="pill pill-win">WIN</span>'
-        :'<span class="pill pill-loss">LOSS</span>';
-      const ptColor = t.points>=0?'#16a34a':'#dc2626';
-      const reason = t.entry_reason||'—';
-      const shortReason = reason.length>40 ? '<span title="'+reason.replace(/"/g,'&quot;')+'" style="cursor:help">'+reason.slice(0,38)+'…</span>' : reason;
-      return '<tr>'
-        +'<td>'+t.num+'</td>'
-        +'<td>'+sigPill+'</td>'
-        +'<td>'+t.entry_time+'</td>'
-        +'<td>'+t.entry_nifty+'</td>'
-        +'<td style="font-size:11px;color:#666">'+shortReason+'</td>'
-        +'<td>'+t.exit_time+'</td>'
-        +'<td>'+t.exit_nifty+'</td>'
-        +'<td style="font-weight:700;color:'+ptColor+'">'+sign+t.points+' pts</td>'
-        +'<td style="font-weight:700;color:'+ptColor+'">'+(t.est_options_pnl>=0?'+':'')+t.est_options_pnl+'</td>'
-        +'<td><span class="pill pill-exit">'+t.exit_reason+'</span></td>'
-        +'<td>'+resPill+'</td>'
-        +'</tr>';
-    }).join('');
-    document.getElementById('mbt-d-trade-tbody').innerHTML = rows;
-  } else {
-    document.getElementById('mbt-d-trades').style.display='block';
-    document.getElementById('mbt-d-trade-tbody').innerHTML = '<tr><td colspan="11" class="empty-state">No trades on this day</td></tr>';
-  }
+  document.getElementById('mbt-d-candle-tbody').innerHTML=(day.candles&&day.candles.length>0)
+    ? day.candles.map(c=>candleRow(c)).join('')
+    : '';
 
-  // Candle timeline
-  if(day.candles && day.candles.length>0){
-    document.getElementById('mbt-d-candles').style.display='block';
-    const rows = day.candles.map(c=>{
-      const bg = c.in_trade ? 'background:#eff6ff' : '';
-      const sigColor = c.signal==='BUY_CE'?'#0369a1':c.signal==='BUY_PE'?'#9d174d':'#aaa';
-      const mktBadge = c.market_state==='TRENDING'
-        ?'<span style="color:#16a34a;font-weight:700;font-size:10px">▲ TREND</span>'
-        :c.market_state==='SIDEWAYS'
-        ?'<span style="color:#f59e0b;font-weight:700;font-size:10px">↔ SIDE</span>'
-        :'<span style="color:#aaa;font-size:10px">—</span>';
-      const noteStyle = c.note.startsWith('ENTRY')
-        ? 'color:#1d4ed8;font-weight:700'
-        : c.note.startsWith('EXIT')
-        ? 'color:#dc2626;font-weight:700'
-        : 'color:#888';
-      return '<tr style="'+bg+'">'
-        +'<td style="font-weight:600">'+c.time+'</td>'
-        +'<td>'+c.open+'</td>'
-        +'<td>'+c.high+'</td>'
-        +'<td>'+c.low+'</td>'
-        +'<td style="font-weight:600">'+c.close+'</td>'
-        +'<td>'+c.vwap+'</td>'
-        +'<td>'+(c.ema20||'—')+'</td>'
-        +'<td>'+mktBadge+'</td>'
-        +'<td style="color:'+sigColor+';font-weight:700;font-size:11px">'+c.signal+'</td>'
-        +'<td style="'+noteStyle+'">'+c.note+'</td>'
-        +'</tr>';
-    }).join('');
-    document.getElementById('mbt-d-candle-tbody').innerHTML = rows;
-  }
-
-  // Scroll to detail
   document.getElementById('mbt-detail').scrollIntoView({behavior:'smooth',block:'start'});
 }
 
@@ -991,18 +1165,18 @@ function closeMultiDetail(){
   document.querySelectorAll('tr.mbt-row').forEach(r=>r.classList.remove('active'));
 }
 
-function mbtMsg(text, type){
-  const el = document.getElementById('mbt-msg');
-  el.textContent = text;
-  el.style.display = text ? 'block' : 'none';
-  el.style.background = type==='err'?'#fee2e2':type==='info'?'#eff6ff':'#dcfce7';
-  el.style.color = type==='err'?'#991b1b':type==='info'?'#1e40af':'#166534';
+function mbtMsg(text,type){
+  const el=document.getElementById('mbt-msg');
+  el.textContent=text; el.style.display=text?'block':'none';
+  el.style.background=type==='err'?'#fee2e2':type==='info'?'#eff6ff':'#dcfce7';
+  el.style.color=type==='err'?'#991b1b':type==='info'?'#1e40af':'#166534';
 }
 
-// Init
-refreshStatus();
+/* ══════════════════════════════════════════════════════════════
+   INIT
+══════════════════════════════════════════════════════════════ */
+refreshAll();
 loadTrades();
 </script>
 </body>
-</html>
-"""
+</html>"""
