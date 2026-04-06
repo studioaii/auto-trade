@@ -186,8 +186,8 @@ def root():
   <!-- live stats grid -->
   <div class="live-grid" id="live-grid" style="display:none">
     <div class="li"><div class="lbl">Nifty Spot</div><div class="val" id="nifty-spot">—</div></div>
-    <div class="li"><div class="lbl">ATM CE LTP</div><div class="val" id="ce-ltp">—</div></div>
-    <div class="li"><div class="lbl">ATM PE LTP</div><div class="val" id="pe-ltp">—</div></div>
+    <div class="li"><div class="lbl">ATM CE LTP</div><div class="val" id="ce-ltp">—</div><div class="lbl" id="ce-sym" style="margin-top:3px;color:#0369a1;font-size:10px;font-weight:700">—</div></div>
+    <div class="li"><div class="lbl">ATM PE LTP</div><div class="val" id="pe-ltp">—</div><div class="lbl" id="pe-sym" style="margin-top:3px;color:#9d174d;font-size:10px;font-weight:700">—</div></div>
     <div class="li"><div class="lbl">Last Signal</div><div class="val" id="last-signal">—</div></div>
     <div class="li"><div class="lbl">Last Candle</div><div class="val" id="last-candle">—</div></div>
     <div class="li"><div class="lbl">Exit Reason</div><div class="val" id="exit-reason">—</div></div>
@@ -209,7 +209,7 @@ def root():
   </div>
 
   <div class="strategy-note">
-    VWAP + EMA(20) · 5-min candles · Target +35% · SL -20% · Trail at +20% · Breakeven +15% · RSI + Volume filters · Max 2 trades/day · 9:50–14:00 entries · Force exit 3:20 PM
+    VWAP + EMA(20) · 5-min candles · Dynamic SL (12–22%) · Trail from +20% (8%→20% gap) · No hard profit target · RSI + Volume filters · Max 2 trades/day · 9:50–14:00 entries · Force exit 3:20 PM
   </div>
 </div>
 
@@ -517,6 +517,10 @@ function updateEngineUI(d) {
   document.getElementById('btn-start').disabled = d.engine_running;
   document.getElementById('btn-stop').disabled  = !d.engine_running;
 
+  // Resume auto-refresh on page reload if engine is already running
+  if(d.engine_running && !autoRefresh) startAutoRefresh();
+  else if(!d.engine_running && autoRefresh) stopAutoRefresh();
+
   const liveGrid = document.getElementById('live-grid');
   if(d.engine_running || d.nifty_spot>0) {
     liveGrid.style.display='grid';
@@ -526,6 +530,11 @@ function updateEngineUI(d) {
     document.getElementById('last-signal').textContent = d.last_signal||'—';
     document.getElementById('last-candle').textContent = d.last_candle_time||'—';
     document.getElementById('exit-reason').textContent = d.exit_reason||'—';
+    // Show ATM option symbols
+    if(d.instruments) {
+      document.getElementById('ce-sym').textContent = d.instruments.ce || '—';
+      document.getElementById('pe-sym').textContent = d.instruments.pe || '—';
+    }
   }
 
   // Open position banner
@@ -536,7 +545,9 @@ function updateEngineUI(d) {
     const pnl = d.pnl;
     document.getElementById('pos-sym').textContent = p.symbol;
     document.getElementById('pos-meta').textContent = p.option_type+' · Strike '+p.strike+' · Expiry '+p.expiry+' · Qty '+p.qty;
-    const slInfo = p.trail_active ? 'Trail SL: ₹'+p.trailing_sl+' (active)' : p.breakeven_set ? 'SL at breakeven' : 'Hard SL: 25%';
+    const slInfo = p.trail_active
+      ? 'Trail SL: ₹'+p.trailing_sl+' (trailing active)'
+      : 'SL: ₹'+p.trailing_sl;
     document.getElementById('pos-sl').textContent = slInfo;
     document.getElementById('pos-entry').textContent = 'Entry: ₹'+p.entry_price+' @ '+p.entry_time;
     if(pnl) {
