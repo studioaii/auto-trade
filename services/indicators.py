@@ -104,7 +104,7 @@ def candle_body_pct(c: Candle) -> float:
     return abs(c.close - c.open) / rng * 100
 
 
-def is_strong_bullish(c: Candle, body_threshold: float = 60.0) -> bool:
+def is_strong_bullish(c: Candle, body_threshold: float = 55.0) -> bool:
     """
     Strong bullish candle:
     - close > open  (green)
@@ -113,7 +113,7 @@ def is_strong_bullish(c: Candle, body_threshold: float = 60.0) -> bool:
     return c.close > c.open and candle_body_pct(c) >= body_threshold
 
 
-def is_strong_bearish(c: Candle, body_threshold: float = 60.0) -> bool:
+def is_strong_bearish(c: Candle, body_threshold: float = 55.0) -> bool:
     """
     Strong bearish candle:
     - close < open  (red)

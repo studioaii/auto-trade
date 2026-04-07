@@ -37,6 +37,9 @@ def get_current_expiry_from_instruments(instruments: list[dict]) -> date:
     """
     Find the nearest upcoming Thursday expiry from the actual instrument data.
     This is more reliable than date arithmetic since exchanges can change expiry days.
+
+    On expiry day itself, skip to the next expiry — same-day options have near-zero
+    time value, making premiums too small for the dynamic SL calculation to work.
     """
     today = date.today()
     nifty_expiries = sorted(set(
@@ -47,6 +50,14 @@ def get_current_expiry_from_instruments(instruments: list[dict]) -> date:
     ))
     if not nifty_expiries:
         raise ValueError("No upcoming Nifty expiries found in instrument data")
+
+    # Skip today's expiry — use next week's options instead
+    if nifty_expiries[0] == today:
+        if len(nifty_expiries) < 2:
+            raise ValueError("On expiry day but no next expiry found in instrument data")
+        logger.info("Today is expiry day (%s) — switching to next expiry: %s", today, nifty_expiries[1])
+        return nifty_expiries[1]
+
     return nifty_expiries[0]
 
 
