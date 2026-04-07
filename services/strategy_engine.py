@@ -207,6 +207,13 @@ class TradingEngine:
                 len(all_candles) >= MIN_CANDLES,
             )
 
+            # Seed market_state from preloaded candles so dashboard shows correct state
+            # before the first WebSocket candle arrives
+            if len(all_candles) >= MIN_CANDLES:
+                ind = get_latest_indicators(all_candles)
+                if ind.get("enough_data"):
+                    update_state(market_state=ind["market_state"])
+
         except Exception as e:
             logger.warning("Session candle preload failed (non-fatal): %s", e)
 
@@ -733,6 +740,7 @@ class TradingEngine:
 
     def _monitoring_loop(self) -> None:
         logger.info("Monitoring loop started")
+        _ltp_fallback_tick = 0
         while True:
             state = get_state()
 
@@ -742,9 +750,34 @@ class TradingEngine:
             if state.position is not None:
                 self._check_position_exits(state)
 
+            # REST fallback: if WebSocket hasn't delivered option LTP yet, poll every 30s
+            _ltp_fallback_tick += 1
+            if _ltp_fallback_tick >= 30:
+                _ltp_fallback_tick = 0
+                if (state.ce_ltp == 0 or state.pe_ltp == 0) and self._ce_instrument and self._pe_instrument:
+                    self._fetch_option_ltp_rest()
+
             time_module.sleep(1)
 
         logger.info("Monitoring loop terminated")
+
+    def _fetch_option_ltp_rest(self) -> None:
+        """Fallback: fetch CE/PE LTP via REST API when WebSocket ticks haven't arrived."""
+        try:
+            ce_sym = f"NFO:{self._ce_instrument['tradingsymbol']}"
+            pe_sym = f"NFO:{self._pe_instrument['tradingsymbol']}"
+            ltp_data = self._kite.ltp([ce_sym, pe_sym])
+            ce_ltp = ltp_data.get(ce_sym, {}).get("last_price", 0)
+            pe_ltp = ltp_data.get(pe_sym, {}).get("last_price", 0)
+            with get_lock():
+                raw = get_raw_state()
+                if ce_ltp > 0:
+                    raw.ce_ltp = ce_ltp
+                if pe_ltp > 0:
+                    raw.pe_ltp = pe_ltp
+            logger.debug("REST LTP fallback | CE=%.2f PE=%.2f", ce_ltp, pe_ltp)
+        except Exception as e:
+            logger.debug("REST LTP fallback failed (non-fatal): %s", e)
 
     def _check_position_exits(self, state: TradingState) -> None:
         """Check exit conditions and trigger exit if needed."""

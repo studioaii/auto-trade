@@ -1364,6 +1364,7 @@ function mbtMsg(text,type){
 /* ══════════════════════════════════════════════════════════════
    INIT
 ══════════════════════════════════════════════════════════════ */
+startAutoRefresh();   // always start 5-sec interval on page load
 refreshAll();
 loadTrades();
 </script>
