@@ -22,7 +22,7 @@ from services.instruments import (
     fetch_nifty_instruments, get_current_expiry, get_atm_strike,
     find_option_instrument, get_nifty_index_token, find_nifty_futures,
 )
-from services.indicators import get_latest_indicators, MIN_CANDLES
+from services.indicators import get_latest_indicators, MIN_CANDLES, candle_body_pct
 from services.strategy import (
     Signal, generate_signal, detect_opposite_signal,
     is_market_open_and_ready, is_force_exit_time,
@@ -36,10 +36,46 @@ from services.risk_manager import (
 )
 from services.paper_trade import log_trade
 from services.candle_logger import log_candle
+from services.entry_logger import log_entry_attempt
 from services.market_data import MarketDataService
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _log_attempt(
+    signal,
+    state,
+    indicators: dict,
+    skip_reason: str,
+    ce_instrument,
+    pe_instrument,
+    option_ltp: float = 0.0,
+    sl_pct_computed: float = 0.0,
+) -> None:
+    """Helper: fire-and-forget entry attempt log at any gate."""
+    try:
+        instrument = ce_instrument if signal.value == "BUY_CE" else pe_instrument
+        atm_strike = int(instrument["strike"]) if instrument else 0
+        ltp = option_ltp or (state.ce_ltp if signal.value == "BUY_CE" else state.pe_ltp)
+        vwap = indicators.get("vwap", 0)
+        vwap_dist = (state.nifty_spot - vwap) / vwap * 100 if vwap > 0 else 0.0
+        candle = state.candles[-1] if state.candles else None
+        body = candle_body_pct(candle) if candle else 0.0
+        log_entry_attempt(
+            signal=signal.value,
+            nifty_spot=state.nifty_spot,
+            atm_strike=atm_strike,
+            option_ltp=ltp,
+            vwap_distance_pct=vwap_dist,
+            rsi14=indicators.get("rsi14") or 0.0,
+            body_pct=body,
+            market_state=indicators.get("market_state", ""),
+            skip_reason=skip_reason,
+            sl_pct_computed=sl_pct_computed,
+        )
+    except Exception:
+        pass  # never let logging break trading
 
 
 class TradingEngine:
@@ -539,6 +575,7 @@ class TradingEngine:
         allowed, block_reason = can_enter_trade(state)
         if not allowed:
             logger.info("Entry blocked: %s", block_reason)
+            _log_attempt(signal, state, indicators, block_reason, self._ce_instrument, self._pe_instrument)
             return
 
         self._execute_entry(signal, reason, indicators)
@@ -592,19 +629,26 @@ class TradingEngine:
 
             # Compute dynamic SL from candle structure
             option_type = signal.value[-2:]   # "CE" or "PE"
-            sl_result = compute_dynamic_sl(
+            sl_price, sl_pct = compute_dynamic_sl(
                 candles=state.candles,
                 option_type=option_type,
                 nifty_spot=state.nifty_spot,
                 entry_price=avg_price,
             )
-            if sl_result is None:
-                # Candle structure too wide — skip this trade
-                logger.info("Trade skipped — dynamic SL too wide for current candle structure")
+            if sl_price is None:
+                logger.info(
+                    "Trade skipped — dynamic SL too wide (%.1f%%) for current candle structure",
+                    sl_pct,
+                )
+                _log_attempt(
+                    signal, state, indicators,
+                    f"DYNAMIC_SL_TOO_WIDE ({sl_pct:.1f}%)",
+                    self._ce_instrument, self._pe_instrument,
+                    option_ltp=avg_price, sl_pct_computed=sl_pct,
+                )
                 with get_lock():
                     get_raw_state().trades_today -= 1  # rollback slot
                 return
-            sl_price, sl_pct = sl_result
 
             # Compute efficiency ratio for logging
             candles_snap = state.candles

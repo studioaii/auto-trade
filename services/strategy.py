@@ -143,7 +143,7 @@ def generate_signal(
     # Log which conditions nearly fired (useful for debugging)
     ce_failed = [k for k, v in ce_conditions.items() if not v]
     pe_failed = [k for k, v in pe_conditions.items() if not v]
-    logger.debug("No signal | CE failed: %s | PE failed: %s", ce_failed, pe_failed)
+    logger.info("No signal | CE failed: %s | PE failed: %s", ce_failed, pe_failed)
 
     return Signal.NO_SIGNAL, ""
 
