@@ -32,7 +32,7 @@ from services.order_service import (
 )
 from services.risk_manager import (
     can_enter_trade, check_exit_conditions, calculate_pnl,
-    compute_dynamic_sl, MAX_TRADES_PER_DAY,
+    INITIAL_SL_PCT, MAX_TRADES_PER_DAY,
 )
 from services.paper_trade import log_trade
 from services.candle_logger import log_candle
@@ -626,28 +626,10 @@ class TradingEngine:
                     instrument["tradingsymbol"], avg_price, order_id
                 )
 
-            # Compute dynamic SL from candle structure
+            # Fixed SL — 20% below entry price
             option_type = signal.value[-2:]   # "CE" or "PE"
-            sl_price, sl_pct = compute_dynamic_sl(
-                candles=state.candles,
-                option_type=option_type,
-                nifty_spot=state.nifty_spot,
-                entry_price=avg_price,
-            )
-            if sl_price is None:
-                logger.info(
-                    "Trade skipped — dynamic SL too wide (%.1f%%) for current candle structure",
-                    sl_pct,
-                )
-                _log_attempt(
-                    signal, state, indicators,
-                    f"DYNAMIC_SL_TOO_WIDE ({sl_pct:.1f}%)",
-                    self._ce_instrument, self._pe_instrument,
-                    option_ltp=avg_price, sl_pct_computed=sl_pct,
-                )
-                with get_lock():
-                    get_raw_state().trades_today -= 1  # rollback slot
-                return
+            sl_price = round(avg_price * (1 - INITIAL_SL_PCT / 100), 2)
+            sl_pct = INITIAL_SL_PCT
 
             # Compute efficiency ratio for logging
             candles_snap = state.candles

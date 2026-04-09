@@ -15,12 +15,7 @@ IST = ZoneInfo("Asia/Kolkata")
 # Strategy risk parameters
 # ---------------------------------------------------------------------------
 
-# Dynamic SL bounds (applied to option premium %)
-SL_FLOOR_PCT        = 12.0   # Minimum SL — tighter risks noise stop-out on options
-SL_CEILING_PCT      = 22.0   # Default ceiling for normal-IV days (premium < 150)
-SL_CEILING_HIGH_IV  = 28.0   # Ceiling for high-IV days (premium 150–199)
-SL_CEILING_VERY_HIGH_IV = 35.0  # Ceiling for very-high-IV days (premium ≥ 200)
-ATM_DELTA           = 0.5    # ATM option delta approximation for Nifty → option conversion
+INITIAL_SL_PCT      = 20.0   # Fixed SL — 20% below entry price
 
 # Trailing SL (activates at +20%, widens by 4% per additional 10% gain)
 TRAIL_TRIGGER       = 20.0   # % gain at which trailing activates
@@ -36,91 +31,6 @@ MARKET_WAIT         = time(9, 50)
 
 def _now_ist() -> time:
     return datetime.now(IST).time()
-
-
-def _adaptive_sl_ceiling(entry_price: float) -> float:
-    """
-    Return the SL ceiling % appropriate for the current IV environment,
-    proxied by the ATM option premium.
-
-    Higher premium = elevated IV = market expects a bigger move, so the
-    Nifty structure range (and thus the raw sl_pct) will naturally be wider.
-    Raising the ceiling on those days lets the strategy trade while still
-    capping risk at a sensible absolute level.
-
-    premium < 150  → 22%  (normal IV)
-    premium 150–199 → 28%  (high IV)
-    premium ≥ 200  → 35%  (very high IV / event days)
-    """
-    if entry_price >= 200:
-        return SL_CEILING_VERY_HIGH_IV
-    if entry_price >= 150:
-        return SL_CEILING_HIGH_IV
-    return SL_CEILING_PCT
-
-
-# ---------------------------------------------------------------------------
-# Dynamic SL computation (called at entry)
-# ---------------------------------------------------------------------------
-def compute_dynamic_sl(
-    candles: list,
-    option_type: str,
-    nifty_spot: float,
-    entry_price: float,
-) -> tuple[float | None, float]:
-    """
-    Compute dynamic SL price from Nifty candle structure.
-
-    Approach:
-    - CE: SL anchored just below the lowest low of the last 3 candles
-    - PE: SL anchored just above the highest high of the last 3 candles
-    - Nifty point distance converted to option % via ATM delta
-    - Floor: SL_FLOOR_PCT (12%) — avoids noise stop-outs on options
-    - Ceiling: adaptive (22% / 28% / 35%) based on option premium level
-
-    Returns (sl_price, sl_pct).
-    sl_price is None if SL is too wide (trade should be skipped).
-    sl_pct is always returned so the caller can log it even on skip.
-    """
-    if entry_price <= 0:
-        return None, 0.0
-
-    ceiling = _adaptive_sl_ceiling(entry_price)
-
-    if len(candles) < 3:
-        # Not enough candles for structure — use floor
-        sl_pct = SL_FLOOR_PCT
-        return entry_price * (1 - sl_pct / 100), sl_pct
-
-    if option_type == "CE":
-        structure_level = min(c.low for c in candles[-3:]) * 0.995   # 0.5% below the low
-        nifty_sl_points = max(nifty_spot - structure_level, 0)
-    else:  # PE
-        structure_level = max(c.high for c in candles[-3:]) * 1.005  # 0.5% above the high
-        nifty_sl_points = max(structure_level - nifty_spot, 0)
-
-    # Convert Nifty points → option premium points using ATM delta
-    option_sl_points = nifty_sl_points * ATM_DELTA
-    sl_pct = (option_sl_points / entry_price) * 100
-
-    if sl_pct > ceiling:
-        logger.info(
-            "Dynamic SL too wide (%.1f%% > ceiling %.1f%%) — skipping | "
-            "structure=%.2f spot=%.2f entry=%.2f",
-            sl_pct, ceiling, structure_level, nifty_spot, entry_price,
-        )
-        return None, sl_pct
-
-    sl_pct = max(sl_pct, SL_FLOOR_PCT)
-    sl_price = entry_price * (1 - sl_pct / 100)
-
-    logger.info(
-        "Dynamic SL | type=%s ceiling=%.1f%% structure=%.2f "
-        "nifty_pts=%.1f opt_pts=%.1f sl_pct=%.1f%% sl_price=%.2f",
-        option_type, ceiling, structure_level,
-        nifty_sl_points, option_sl_points, sl_pct, sl_price,
-    )
-    return sl_price, sl_pct
 
 
 # ---------------------------------------------------------------------------
