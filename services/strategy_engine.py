@@ -103,65 +103,64 @@ class TradingEngine:
 
     def _load_session_candles(self) -> None:
         """
-        Preload today's completed 5-min candles from Kite historical API so that
-        indicators are ready immediately when the engine starts mid-session.
+        Preload historical 5-min candles so indicators are ready as early as possible.
 
-        - Fetches today from 9:15 AM up to (but not including) the current incomplete candle.
-        - If today has < MIN_CANDLES candles, prepends the last N candles from the previous
-          trading day so EMA-20 and RSI-14 can warm up correctly.
-        - VWAP is computed separately in indicators.py using today-only candles.
-        - Safe to call before WebSocket starts (uses REST historical API).
+        - Pre-market start (before 9:15 AM): loads only previous-day seed candles so that
+          EMA-20 and RSI-14 are warmed up the moment the first live candle closes at 9:20.
+        - Mid-session start (after 9:15 AM): fetches today's completed candles AND prepends
+          previous-day seed candles if today doesn't have enough yet.
+        - VWAP is computed separately in indicators.py using today-only candles, so seed
+          candles from yesterday never corrupt the intraday VWAP value.
         """
         try:
             now = datetime.now(IST)
-            # Nothing to load before the session begins
-            if now.hour < 9 or (now.hour == 9 and now.minute < 15):
-                logger.info("Before 9:15 AM — skipping historical candle preload")
-                return
+            pre_market = now.hour < 9 or (now.hour == 9 and now.minute < 15)
 
             candle_token = self._nifty_futures_token or self._nifty_index_token
             today = now.date()
 
-            session_start = datetime(today.year, today.month, today.day, 9, 15, 0, tzinfo=IST)
-            # Current incomplete candle slot — exclude it
-            current_slot_start = now.replace(
-                minute=(now.minute // 5) * 5, second=0, microsecond=0
-            )
-
-            logger.info(
-                "Preloading session candles | token=%s | %s → %s",
-                candle_token,
-                session_start.strftime("%H:%M"),
-                current_slot_start.strftime("%H:%M"),
-            )
-
-            raw_today = self._kite.historical_data(
-                instrument_token=candle_token,
-                from_date=session_start,
-                to_date=now,
-                interval="5minute",
-            )
-
+            # ── Today's candles (only available after 9:15 AM) ───────────────
             today_candles: list[Candle] = []
-            for row in raw_today:
-                ts = row["date"]
-                if hasattr(ts, "astimezone"):
-                    ts = ts.astimezone(IST)
-                if ts >= current_slot_start:
-                    continue  # skip the still-open candle
-                today_candles.append(Candle(
-                    timestamp=ts,
-                    open=row["open"],
-                    high=row["high"],
-                    low=row["low"],
-                    close=row["close"],
-                    volume=row.get("volume", 0),
-                ))
-
-            logger.info(
-                "Today's candles: %d (need %d for warm indicators)",
-                len(today_candles), MIN_CANDLES,
-            )
+            if not pre_market:
+                session_start = datetime(today.year, today.month, today.day, 9, 15, 0, tzinfo=IST)
+                current_slot_start = now.replace(
+                    minute=(now.minute // 5) * 5, second=0, microsecond=0
+                )
+                logger.info(
+                    "Preloading session candles | token=%s | %s → %s",
+                    candle_token,
+                    session_start.strftime("%H:%M"),
+                    current_slot_start.strftime("%H:%M"),
+                )
+                raw_today = self._kite.historical_data(
+                    instrument_token=candle_token,
+                    from_date=session_start,
+                    to_date=now,
+                    interval="5minute",
+                )
+                for row in raw_today:
+                    ts = row["date"]
+                    if hasattr(ts, "astimezone"):
+                        ts = ts.astimezone(IST)
+                    if ts >= current_slot_start:
+                        continue  # skip still-open candle
+                    today_candles.append(Candle(
+                        timestamp=ts,
+                        open=row["open"],
+                        high=row["high"],
+                        low=row["low"],
+                        close=row["close"],
+                        volume=row.get("volume", 0),
+                    ))
+                logger.info(
+                    "Today's candles: %d (need %d for warm indicators)",
+                    len(today_candles), MIN_CANDLES,
+                )
+            else:
+                logger.info(
+                    "Pre-market start — skipping today's historical fetch; "
+                    "loading previous-day seed candles for EMA/RSI warmup"
+                )
 
             all_candles = today_candles
 

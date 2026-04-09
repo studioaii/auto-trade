@@ -928,7 +928,6 @@ async function stopEngine() {
     setMsg('Stopped. Trades: '+d.trades_today+p,'ok');
     document.getElementById('btn-start').disabled=false;
     document.getElementById('btn-stop').disabled=true;
-    stopAutoRefresh();
   } catch(e){setMsg('Error: '+e,'err');}
   await refreshAll();
   loadTrades();
@@ -965,8 +964,7 @@ function updateEngineUI(d) {
   document.getElementById('btn-start').disabled = d.engine_running;
   document.getElementById('btn-stop').disabled  = !d.engine_running;
 
-  if(d.engine_running && !autoRefresh) startAutoRefresh();
-  else if(!d.engine_running && autoRefresh) stopAutoRefresh();
+  // Always keep the refresh interval alive — data should update even when stopped
 
   const show = d.engine_running || d.nifty_spot > 0;
   document.getElementById('mstrip').style.display = show ? 'grid' : 'none';
