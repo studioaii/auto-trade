@@ -193,13 +193,100 @@ class MarketDataService:
             self._option_tokens,
         )
 
-        # If we already have candle data this is a reconnect — backfill any missed candles
+        # Reconnect: backfill any candles missed during the gap
         if get_state().last_candle_time is not None:
             threading.Thread(
                 target=self._backfill_missing_candles,
                 name="CandleBackfill",
                 daemon=True,
             ).start()
+        else:
+            # First start: backfill today's full history from market open (9:15 IST)
+            # so the chart shows the complete day even when the engine starts late.
+            threading.Thread(
+                target=self._backfill_today_candles,
+                name="CandleBackfillToday",
+                daemon=True,
+            ).start()
+
+    def _backfill_today_candles(self) -> None:
+        """
+        Called on first engine start when no candles exist yet.
+        Fetches all completed 5-min candles from 9:15 AM IST to now so the
+        live chart shows the full trading day rather than starting at engine-start time.
+        """
+        from services.kite_service import require_authenticated_client
+
+        try:
+            now = datetime.now(IST)
+            market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+
+            if now <= market_open:
+                logger.info("Backfill today: market has not opened yet — skipping")
+                return
+
+            kite = require_authenticated_client()
+            candle_token = self._nifty_futures_token or self._nifty_index_token
+
+            logger.info(
+                "Backfilling today's candles from market open | from=%s to=%s token=%s",
+                market_open.strftime("%H:%M"), now.strftime("%H:%M"), candle_token,
+            )
+
+            historical = kite.historical_data(
+                instrument_token=candle_token,
+                from_date=market_open,
+                to_date=now,
+                interval="5minute",
+            )
+
+            if not historical:
+                logger.info("Backfill today: no historical candles returned")
+                return
+
+            # Exclude the still-open current candle slot
+            current_slot_start = now.replace(
+                minute=(now.minute // 5) * 5, second=0, microsecond=0
+            )
+            new_candles: list[Candle] = []
+            for row in historical:
+                ts = row["date"]
+                if hasattr(ts, "astimezone"):
+                    ts = ts.astimezone(IST)
+                if ts >= current_slot_start:
+                    continue   # incomplete candle — skip
+                new_candles.append(Candle(
+                    timestamp=ts,
+                    open=row["open"],
+                    high=row["high"],
+                    low=row["low"],
+                    close=row["close"],
+                    volume=row.get("volume", 0),
+                ))
+
+            if not new_candles:
+                logger.info("Backfill today: no completed candles to inject")
+                return
+
+            with get_lock():
+                raw = get_raw_state()
+                # Merge: skip any timestamps already collected via live ticks
+                existing_times = {c.timestamp for c in raw.candles}
+                to_add = [c for c in new_candles if c.timestamp not in existing_times]
+                raw.candles.extend(to_add)
+                raw.candles.sort(key=lambda c: c.timestamp)
+                if raw.candles:
+                    raw.last_candle_time = raw.candles[-1].timestamp
+
+            logger.info(
+                "Today backfill complete: %d candles injected | %s → %s",
+                len(new_candles),
+                new_candles[0].timestamp.strftime("%H:%M"),
+                new_candles[-1].timestamp.strftime("%H:%M"),
+            )
+
+        except Exception as e:
+            logger.warning("Today candle backfill failed (non-fatal): %s", e)
 
     def _backfill_missing_candles(self) -> None:
         """
