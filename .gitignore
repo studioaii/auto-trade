@@ -3,3 +3,6 @@
 paper_trades.csv
 __pycache__/
 *.pyc
+trading.log
+frontend/node_modules/
+FRONTEND_MIGRATION.md
