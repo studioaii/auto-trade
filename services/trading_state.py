@@ -69,6 +69,64 @@ class TradingState:
 
 
 # ---------------------------------------------------------------------------
+# Per-instrument state manager (used by multi-instrument engines)
+# ---------------------------------------------------------------------------
+
+class InstrumentStateManager:
+    """
+    Owns a TradingState + Lock for one instrument.
+    The Nifty engine uses the module-level singleton below (backward compat).
+    The BankNifty engine gets its own InstrumentStateManager instance.
+    """
+
+    def __init__(self, instrument_name: str = "NIFTY"):
+        self._instrument_name = instrument_name
+        self._state = TradingState()
+        self._lock = threading.Lock()
+
+    def get_state(self) -> TradingState:
+        with self._lock:
+            import copy
+            return copy.copy(self._state)
+
+    def update_state(self, **kwargs) -> None:
+        with self._lock:
+            for key, value in kwargs.items():
+                if hasattr(self._state, key):
+                    setattr(self._state, key, value)
+                else:
+                    logger.warning("TradingState has no field: %s (instrument=%s)", key, self._instrument_name)
+
+    def get_lock(self) -> threading.Lock:
+        return self._lock
+
+    def get_raw_state(self) -> TradingState:
+        return self._state
+
+    def reset_daily_state(self, mode: str = "PAPER") -> None:
+        with self._lock:
+            self._state.trading_mode = mode
+            self._state.trades_today = 0
+            self._state.trade_done = False
+            self._state.position = None
+            self._state.candles = []
+            self._state.nifty_spot = 0.0
+            self._state.nifty_futures_ltp = 0.0
+            self._state.ce_ltp = 0.0
+            self._state.pe_ltp = 0.0
+            self._state.last_signal = "NO_SIGNAL"
+            self._state.market_state = "UNKNOWN"
+            self._state.last_candle_time = None
+            self._state.exit_reason = None
+            self._state.exit_price = None
+            self._state.pnl = None
+            self._state.error_message = None
+            self._state.vwap_cum_tp_vol = 0.0
+            self._state.vwap_cum_vol = 0.0
+        logger.info("Daily state reset | instrument=%s mode=%s", self._instrument_name, mode)
+
+
+# ---------------------------------------------------------------------------
 # Module-level singleton + lock
 # ---------------------------------------------------------------------------
 _state = TradingState()

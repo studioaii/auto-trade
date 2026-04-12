@@ -163,6 +163,58 @@ body {
 .nav-icon { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
 .nav-label { font-size: 13px; }
 
+/* ── Global engine control in sidebar ── */
+.sidebar-engine-ctrl {
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.engine-ctrl-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.engine-ctrl-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.engine-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.engine-ctrl-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.engine-ctrl-btn {
+  flex: 1;
+  padding: 5px 4px !important;
+  font-size: 10px !important;
+  min-width: 0;
+}
+
+.engine-ctrl-msg {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+}
+
+.engine-ctrl-msg.ok  { color: var(--green); }
+.engine-ctrl-msg.err { color: var(--red); }
+
 .sidebar-footer {
   padding: 14px 16px;
   border-top: 1px solid var(--border-light);

@@ -49,9 +49,10 @@ HEADERS = [
 ]
 
 
-def _log_path(date_str: str) -> str:
+def _log_path(date_str: str, instrument: str = "NIFTY") -> str:
     os.makedirs(LOG_DIR, exist_ok=True)
-    return os.path.join(LOG_DIR, f"candles_{date_str}.csv")
+    prefix = "banknifty" if instrument.upper() == "BANKNIFTY" else "nifty"
+    return os.path.join(LOG_DIR, f"{prefix}_candles_{date_str}.csv")
 
 
 def log_candle(
@@ -60,6 +61,7 @@ def log_candle(
     signal_value: str,
     state: TradingState,
     atm_strike: Optional[int],
+    instrument: str = "NIFTY",
 ) -> None:
     """
     Append one row to today's candle CSV.
@@ -74,7 +76,7 @@ def log_candle(
 
         ts       = candle.timestamp
         date_str = ts.strftime("%Y-%m-%d")
-        path     = _log_path(date_str)
+        path     = _log_path(date_str, instrument)
         write_hdr = not os.path.exists(path)
 
         candles       = state.candles
@@ -147,18 +149,30 @@ def log_candle(
         logger.warning("Candle log write failed (non-fatal): %s", e)
 
 
-def list_log_files() -> list[dict]:
-    """Return metadata for all available candle log CSVs."""
+def list_log_files(instrument: str = "") -> list[dict]:
+    """Return metadata for all available candle log CSVs, optionally filtered by instrument."""
     if not os.path.isdir(LOG_DIR):
         return []
     files = []
     for fname in sorted(os.listdir(LOG_DIR), reverse=True):
-        if fname.startswith("candles_") and fname.endswith(".csv"):
-            path = os.path.join(LOG_DIR, fname)
-            date = fname[len("candles_"):-len(".csv")]
-            size_kb = round(os.path.getsize(path) / 1024, 1)
-            # Quick row count (subtract header)
-            with open(path) as f:
-                rows = max(0, sum(1 for _ in f) - 1)
-            files.append({"date": date, "rows": rows, "size_kb": size_kb, "path": path})
+        if not fname.endswith(".csv"):
+            continue
+        path = os.path.join(LOG_DIR, fname)
+        if fname.startswith("nifty_candles_"):
+            inst = "NIFTY"
+            date_str = fname[len("nifty_candles_"):-len(".csv")]
+        elif fname.startswith("banknifty_candles_"):
+            inst = "BANKNIFTY"
+            date_str = fname[len("banknifty_candles_"):-len(".csv")]
+        elif fname.startswith("candles_"):   # old format — treat as NIFTY
+            inst = "NIFTY"
+            date_str = fname[len("candles_"):-len(".csv")]
+        else:
+            continue
+        if instrument and inst != instrument.upper():
+            continue
+        size_kb = round(os.path.getsize(path) / 1024, 1)
+        with open(path) as f:
+            rows = max(0, sum(1 for _ in f) - 1)
+        files.append({"date": date_str, "instrument": inst, "rows": rows, "size_kb": size_kb, "path": path})
     return files

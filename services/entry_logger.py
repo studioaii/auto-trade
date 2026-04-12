@@ -16,7 +16,11 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
-LOG_PATH = "entry_attempts.csv"
+LOG_PATHS = {
+    "NIFTY":     "entry_attempts_nifty.csv",
+    "BANKNIFTY": "entry_attempts_banknifty.csv",
+}
+LOG_PATH = LOG_PATHS["NIFTY"]   # backward-compat alias
 
 HEADERS = [
     "date", "time",
@@ -40,11 +44,13 @@ def log_entry_attempt(
     market_state: str,
     skip_reason: str,
     sl_pct_computed: float = 0.0,
+    instrument: str = "NIFTY",
 ) -> None:
     """Append one row. Non-fatal — never raises."""
     try:
+        path = LOG_PATHS.get(instrument.upper(), LOG_PATHS["NIFTY"])
         now = datetime.now(IST)
-        write_hdr = not os.path.exists(LOG_PATH)
+        write_hdr = not os.path.exists(path)
         row = {
             "date":               now.strftime("%Y-%m-%d"),
             "time":               now.strftime("%H:%M"),
@@ -59,7 +65,7 @@ def log_entry_attempt(
             "skip_reason":        skip_reason,
             "sl_pct_computed":    round(sl_pct_computed, 1) if sl_pct_computed else "",
         }
-        with open(LOG_PATH, "a", newline="") as f:
+        with open(path, "a", newline="") as f:
             w = csv.DictWriter(f, fieldnames=HEADERS)
             if write_hdr:
                 w.writeheader()

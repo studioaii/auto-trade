@@ -1,7 +1,7 @@
 """
 Paper trading logger — records every simulated trade to CSV.
 No real orders are placed. Entry/exit prices come from live LTP via WebSocket.
-CSV is appended to daily, stored in the project directory.
+Separate CSV files per instrument: paper_trades_nifty.csv, paper_trades_banknifty.csv
 """
 import csv
 import logging
@@ -12,7 +12,14 @@ from zoneinfo import ZoneInfo
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
-CSV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "paper_trades.csv")
+_ROOT = os.path.dirname(os.path.dirname(__file__))
+
+CSV_PATHS = {
+    "NIFTY":     os.path.join(_ROOT, "paper_trades_nifty.csv"),
+    "BANKNIFTY": os.path.join(_ROOT, "paper_trades_banknifty.csv"),
+}
+# Backward-compat alias
+CSV_PATH = CSV_PATHS["NIFTY"]
 
 FIELDNAMES = [
     "date",
@@ -30,7 +37,7 @@ FIELDNAMES = [
     "pnl_rupees",
     "pnl_pct",
     "result",
-    # Nifty index context
+    # Index context
     "nifty_spot_entry",
     "nifty_spot_exit",
     # Indicator snapshot at entry
@@ -47,13 +54,17 @@ FIELDNAMES = [
 ]
 
 
-def _ensure_header() -> None:
+def _get_csv_path(instrument: str = "NIFTY") -> str:
+    return CSV_PATHS.get(instrument.upper(), CSV_PATHS["NIFTY"])
+
+
+def _ensure_header(path: str) -> None:
     """Write CSV header if file doesn't exist or is empty."""
-    if not os.path.exists(CSV_PATH) or os.path.getsize(CSV_PATH) == 0:
-        with open(CSV_PATH, "w", newline="") as f:
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        with open(path, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
             writer.writeheader()
-        logger.info("Created paper_trades.csv at %s", CSV_PATH)
+        logger.info("Created paper trades CSV at %s", path)
 
 
 def log_trade(
@@ -79,9 +90,11 @@ def log_trade(
     rsi14_entry: float = 0.0,
     market_state_entry: str = "",
     efficiency_entry: float = 0.0,
+    instrument: str = "NIFTY",
 ) -> None:
-    """Append one completed trade record to paper_trades.csv."""
-    _ensure_header()
+    """Append one completed trade record to the instrument's paper trades CSV."""
+    path = _get_csv_path(instrument)
+    _ensure_header(path)
 
     pnl_points = round(exit_price - entry_price, 2)
     pnl_rupees = round(pnl_points * qty, 2)
@@ -116,29 +129,30 @@ def log_trade(
         "breakeven_set":      breakeven_set,
     }
 
-    with open(CSV_PATH, "a", newline="") as f:
+    with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writerow(row)
 
     logger.info(
-        "PAPER TRADE LOGGED | %s %s | entry=%.2f exit=%.2f | PnL: ₹%.2f (%.1f%%) | %s",
-        option_symbol, option_type, entry_price, exit_price,
+        "PAPER TRADE LOGGED | %s | %s %s | entry=%.2f exit=%.2f | PnL: ₹%.2f (%.1f%%) | %s",
+        instrument, option_symbol, option_type, entry_price, exit_price,
         pnl_rupees, pnl_pct, reason_for_exit
     )
 
 
-def read_trades() -> list[dict]:
-    """Return all logged paper trades as list of dicts."""
-    if not os.path.exists(CSV_PATH):
+def read_trades(instrument: str = "NIFTY") -> list[dict]:
+    """Return all logged paper trades for the given instrument."""
+    path = _get_csv_path(instrument)
+    if not os.path.exists(path):
         return []
-    with open(CSV_PATH, "r", newline="") as f:
+    with open(path, "r", newline="") as f:
         reader = csv.DictReader(f)
         return list(reader)
 
 
-def get_summary() -> dict:
-    """Compute summary statistics from all logged paper trades."""
-    trades = read_trades()
+def get_summary(instrument: str = "NIFTY") -> dict:
+    """Compute summary statistics from all logged paper trades for an instrument."""
+    trades = read_trades(instrument)
     if not trades:
         return {"total_trades": 0, "message": "No paper trades logged yet"}
 
@@ -163,5 +177,5 @@ def get_summary() -> dict:
         "avg_loss_rs":    round(sum(losses) / len(losses), 2) if losses else 0,
         "max_win_rs":     round(max(pnl_values), 2) if pnl_values else 0,
         "max_loss_rs":    round(min(pnl_values), 2) if pnl_values else 0,
-        "csv_path":       CSV_PATH,
+        "csv_path":       _get_csv_path(instrument),
     }

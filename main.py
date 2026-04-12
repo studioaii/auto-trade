@@ -29,16 +29,17 @@ async def lifespan(app: FastAPI):
     logger.info("Logesh Auto Trading Engine starting up")
     yield
     logger.info("Logesh Auto Trading Engine shutting down")
-    from services.trading_state import get_state
-    from services.strategy_engine import get_engine
+    from services.strategy_engine import get_nifty_engine, get_banknifty_engine
     from services.kite_service import get_stored_token, require_authenticated_client
-    if get_state().engine_running and get_stored_token():
+    if get_stored_token():
         try:
             kite = require_authenticated_client()
-            get_engine().stop(kite)
-            logger.info("Trading engine stopped on shutdown")
+            for eng in (get_nifty_engine(), get_banknifty_engine()):
+                if eng.get_status()["engine_running"]:
+                    eng.stop(kite)
+                    logger.info("%s engine stopped on shutdown", eng._instrument_name)
         except Exception as e:
-            logger.warning("Could not cleanly stop engine on shutdown: %s", e)
+            logger.warning("Could not cleanly stop engines on shutdown: %s", e)
 
 
 app = FastAPI(

@@ -1,12 +1,13 @@
 import logging
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from kiteconnect import KiteTicker
 
-from services.trading_state import Candle, get_lock, get_raw_state, get_state, update_state
+from services.trading_state import Candle
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -24,24 +25,19 @@ class CandleBuilder:
         self._low: Optional[float] = None
         self._close: Optional[float] = None
         self._volume: int = 0
-        self._candle_slot: Optional[int] = None   # minute slot of current candle
+        self._candle_slot: Optional[int] = None
         self._candle_start: Optional[datetime] = None
 
     def _current_slot(self, ts: datetime) -> int:
         return (ts.minute // 5) * 5
 
     def process_tick(self, price: float, volume: int, timestamp: datetime) -> Optional[Candle]:
-        """
-        Feed a tick. Returns a completed Candle if the 5-min boundary was crossed.
-        """
         slot = self._current_slot(timestamp)
 
-        # First tick ever
         if self._candle_slot is None:
             self._start_new_candle(price, volume, timestamp, slot)
             return None
 
-        # Same candle — update OHLC
         if slot == self._candle_slot:
             self._high = max(self._high, price)
             self._low = min(self._low, price)
@@ -49,7 +45,6 @@ class CandleBuilder:
             self._volume += volume
             return None
 
-        # New slot — finalize previous candle, start new one
         completed = Candle(
             timestamp=self._candle_start,
             open=self._open,
@@ -71,66 +66,118 @@ class CandleBuilder:
         self._candle_start = timestamp.replace(minute=slot, second=0, microsecond=0)
 
 
+@dataclass
+class InstrumentSubscription:
+    """
+    All data needed to route WebSocket ticks for one instrument
+    and inject candles/spots into that instrument's state.
+    """
+    instrument_name: str
+    index_token: int
+    futures_token: int                          # 0 if not available
+    option_tokens: list
+    candle_callback: Callable                   # (Candle) -> None
+    spot_callback: Callable                     # (float) -> None
+    option_ltp_callback: Callable               # (token, ltp) -> None
+    # State accessors — injected by TradingEngine so backfill writes to the right state
+    get_lock_fn: Callable
+    get_raw_state_fn: Callable
+    get_state_fn: Callable
+    update_state_fn: Callable
+    candle_builder: CandleBuilder = field(default_factory=CandleBuilder)
+
+
 class MarketDataService:
     """
-    Manages KiteTicker WebSocket connection.
-    Runs in a background thread (KiteTicker is non-async).
+    Manages ONE KiteTicker WebSocket shared across all instruments.
+    Each instrument registers an InstrumentSubscription; ticks are routed
+    to the correct instrument by token.
     """
 
     def __init__(self):
         self._ticker: Optional[KiteTicker] = None
-        self._nifty_builder = CandleBuilder()
-        self._nifty_index_token: int = 0
-        self._nifty_futures_token: int = 0   # Futures for candle building (has real volume)
-        self._option_tokens: list[int] = []
-        self._candle_callback: Optional[Callable[[Candle], None]] = None
-        self._spot_callback: Optional[Callable[[float], None]] = None
-        self._option_ltp_callback: Optional[Callable[[int, float], None]] = None
-        self._running = False
+        self._api_key: str = ""
+        self._access_token: str = ""
+        self._running: bool = False
         self._lock = threading.Lock()
+        # instrument_name -> InstrumentSubscription
+        self._subscriptions: dict[str, InstrumentSubscription] = {}
+        # token -> instrument_name (fast routing)
+        self._token_to_instrument: dict[int, str] = {}
 
-    def start(
-        self,
-        api_key: str,
-        access_token: str,
-        nifty_index_token: int,
-        option_tokens: list[int],
-        candle_callback: Callable[[Candle], None],
-        spot_callback: Callable[[float], None],
-        option_ltp_callback: Callable[[int, float], None],
-        nifty_futures_token: int = 0,
-    ) -> None:
-        """Start KiteTicker in background thread."""
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def start(self, api_key: str, access_token: str, subscription: InstrumentSubscription) -> None:
+        """
+        Register an instrument and start the WebSocket if not already running.
+        If already running, subscribe the new instrument's tokens immediately.
+        """
         with self._lock:
+            self._api_key = api_key
+            self._access_token = access_token
+            self._add_subscription_locked(subscription)
+
             if self._running:
-                logger.warning("MarketDataService already running")
+                # Ticker already up — subscribe new tokens immediately
+                self._subscribe_tokens_for(subscription)
+                logger.info(
+                    "Registered %s on existing WebSocket", subscription.instrument_name
+                )
                 return
 
-            self._nifty_index_token = nifty_index_token
-            self._nifty_futures_token = nifty_futures_token
-            self._option_tokens = option_tokens
-            self._candle_callback = candle_callback
-            self._spot_callback = spot_callback
-            self._option_ltp_callback = option_ltp_callback
             self._running = True
 
+        # First instrument: start the ticker (outside lock)
         ticker = KiteTicker(api_key, access_token, reconnect=True)
-        ticker.on_connect = self._on_connect
-        ticker.on_ticks = self._on_ticks
-        ticker.on_close = self._on_close
-        ticker.on_error = self._on_error
-        ticker.on_reconnect = self._on_reconnect
+        ticker.on_connect    = self._on_connect
+        ticker.on_ticks      = self._on_ticks
+        ticker.on_close      = self._on_close
+        ticker.on_error      = self._on_error
+        ticker.on_reconnect  = self._on_reconnect
         ticker.on_noreconnect = self._on_noreconnect
 
         self._ticker = ticker
-        # threaded=True: starts its own thread, call returns immediately
         ticker.connect(threaded=True)
-        logger.info("KiteTicker started (threaded)")
+        logger.info("KiteTicker started (threaded) for %s", subscription.instrument_name)
+
+    def unregister_instrument(self, instrument_name: str) -> None:
+        """
+        Remove an instrument's subscription and unsubscribe its tokens.
+        Stops the ticker entirely when no subscriptions remain.
+        """
+        tokens_to_remove = []
+        remaining = 0
+
+        with self._lock:
+            sub = self._subscriptions.pop(instrument_name, None)
+            if sub:
+                tokens_to_remove = [sub.index_token]
+                if sub.futures_token:
+                    tokens_to_remove.append(sub.futures_token)
+                tokens_to_remove.extend(sub.option_tokens or [])
+                for tok in tokens_to_remove:
+                    self._token_to_instrument.pop(tok, None)
+            remaining = len(self._subscriptions)
+
+        if tokens_to_remove and self._ticker:
+            try:
+                self._ticker.unsubscribe(tokens_to_remove)
+            except Exception as e:
+                logger.warning("Failed to unsubscribe %s tokens: %s", instrument_name, e)
+
+        logger.info("Unregistered %s | remaining instruments=%d", instrument_name, remaining)
+
+        if remaining == 0:
+            self.stop()
 
     def stop(self) -> None:
-        """Disconnect WebSocket and clean up."""
+        """Disconnect WebSocket and clear all subscriptions."""
         with self._lock:
             self._running = False
+            self._subscriptions.clear()
+            self._token_to_instrument.clear()
 
         if self._ticker:
             try:
@@ -140,96 +187,134 @@ class MarketDataService:
             self._ticker = None
         logger.info("KiteTicker stopped")
 
-    def update_option_subscriptions(self, new_tokens: list[int]) -> None:
-        """Subscribe additional option tokens after engine start."""
-        if not self._ticker:
-            return
-        try:
-            self._ticker.subscribe(new_tokens)
-            self._ticker.set_mode(self._ticker.MODE_LTP, new_tokens)
-            logger.info("Subscribed to option tokens: %s", new_tokens)
-        except Exception as e:
-            logger.error("Failed to subscribe to tokens: %s", e)
+    def swap_option_subscriptions(
+        self, instrument_name: str, old_tokens: list[int], new_tokens: list[int]
+    ) -> None:
+        """Unsubscribe old option tokens and subscribe new ones (ATM reselection)."""
+        with self._lock:
+            sub = self._subscriptions.get(instrument_name)
+            if sub:
+                for tok in sub.option_tokens:
+                    self._token_to_instrument.pop(tok, None)
+                sub.option_tokens = list(new_tokens)
+                for tok in new_tokens:
+                    self._token_to_instrument[tok] = instrument_name
 
-    def swap_option_subscriptions(self, old_tokens: list[int], new_tokens: list[int]) -> None:
-        """Unsubscribe old option tokens and subscribe new ones. Used for ATM reselection."""
         if not self._ticker:
             return
         try:
             if old_tokens:
                 self._ticker.unsubscribe(old_tokens)
-            self._option_tokens = new_tokens
             if new_tokens:
                 self._ticker.subscribe(new_tokens)
                 self._ticker.set_mode(self._ticker.MODE_LTP, new_tokens)
-            logger.info("Option subscriptions swapped | old=%s → new=%s", old_tokens, new_tokens)
+            logger.info(
+                "Option subscriptions swapped | %s | old=%s → new=%s",
+                instrument_name, old_tokens, new_tokens,
+            )
         except Exception as e:
             logger.error("Failed to swap option subscriptions: %s", e)
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _add_subscription_locked(self, sub: InstrumentSubscription) -> None:
+        """Register subscription and update token routing. Call with self._lock held."""
+        self._subscriptions[sub.instrument_name] = sub
+        self._token_to_instrument[sub.index_token] = sub.instrument_name
+        if sub.futures_token:
+            self._token_to_instrument[sub.futures_token] = sub.instrument_name
+        for tok in (sub.option_tokens or []):
+            self._token_to_instrument[tok] = sub.instrument_name
+
+    def _subscribe_tokens_for(self, sub: InstrumentSubscription) -> None:
+        """Subscribe and set modes for one instrument's tokens. Ticker must be running."""
+        if not self._ticker:
+            return
+        try:
+            tokens = [sub.index_token]
+            full_mode = [sub.index_token]
+            if sub.futures_token:
+                tokens.append(sub.futures_token)
+                full_mode.append(sub.futures_token)
+            if sub.option_tokens:
+                tokens.extend(sub.option_tokens)
+
+            self._ticker.subscribe(tokens)
+            self._ticker.set_mode(self._ticker.MODE_FULL, full_mode)
+            if sub.option_tokens:
+                self._ticker.set_mode(self._ticker.MODE_LTP, sub.option_tokens)
+        except Exception as e:
+            logger.error("Failed to subscribe tokens for %s: %s", sub.instrument_name, e)
 
     # ------------------------------------------------------------------
     # KiteTicker callbacks
     # ------------------------------------------------------------------
 
     def _on_connect(self, ws, response) -> None:
-        # Build subscription list
-        all_tokens = [self._nifty_index_token] + self._option_tokens
-        full_mode_tokens = [self._nifty_index_token]
+        all_tokens = []
+        full_mode_tokens = []
+        ltp_mode_tokens = []
 
-        # If futures token is available, subscribe it in FULL mode for candle building
-        # (futures have real volume, index does not)
-        if self._nifty_futures_token:
-            all_tokens.append(self._nifty_futures_token)
-            full_mode_tokens.append(self._nifty_futures_token)
+        # Snapshot subscriptions (avoid holding lock while doing I/O)
+        with self._lock:
+            subs = list(self._subscriptions.values())
+
+        for sub in subs:
+            all_tokens.append(sub.index_token)
+            full_mode_tokens.append(sub.index_token)
+            if sub.futures_token:
+                all_tokens.append(sub.futures_token)
+                full_mode_tokens.append(sub.futures_token)
+            if sub.option_tokens:
+                all_tokens.extend(sub.option_tokens)
+                ltp_mode_tokens.extend(sub.option_tokens)
 
         ws.subscribe(all_tokens)
         ws.set_mode(ws.MODE_FULL, full_mode_tokens)
-        if self._option_tokens:
-            ws.set_mode(ws.MODE_LTP, self._option_tokens)
+        if ltp_mode_tokens:
+            ws.set_mode(ws.MODE_LTP, ltp_mode_tokens)
+
         logger.info(
-            "WebSocket connected | index=%s futures=%s options=%s",
-            self._nifty_index_token,
-            self._nifty_futures_token or "none",
-            self._option_tokens,
+            "WebSocket connected | instruments=%s | tokens=%d",
+            [s.instrument_name for s in subs], len(all_tokens),
         )
 
-        # Reconnect: backfill any candles missed during the gap
-        if get_state().last_candle_time is not None:
-            threading.Thread(
-                target=self._backfill_missing_candles,
-                name="CandleBackfill",
-                daemon=True,
-            ).start()
-        else:
-            # First start: backfill today's full history from market open (9:15 IST)
-            # so the chart shows the complete day even when the engine starts late.
-            threading.Thread(
-                target=self._backfill_today_candles,
-                name="CandleBackfillToday",
-                daemon=True,
-            ).start()
+        # Backfill candles for each instrument in background
+        for sub in subs:
+            state = sub.get_state_fn()
+            if state.last_candle_time is not None:
+                threading.Thread(
+                    target=self._backfill_missing_candles,
+                    args=(sub,),
+                    name=f"CandleBackfill-{sub.instrument_name}",
+                    daemon=True,
+                ).start()
+            else:
+                threading.Thread(
+                    target=self._backfill_today_candles,
+                    args=(sub,),
+                    name=f"CandleBackfillToday-{sub.instrument_name}",
+                    daemon=True,
+                ).start()
 
-    def _backfill_today_candles(self) -> None:
-        """
-        Called on first engine start when no candles exist yet.
-        Fetches all completed 5-min candles from 9:15 AM IST to now so the
-        live chart shows the full trading day rather than starting at engine-start time.
-        """
+    def _backfill_today_candles(self, sub: InstrumentSubscription) -> None:
+        """Fetch all completed 5-min candles from market open to now for a subscription."""
         from services.kite_service import require_authenticated_client
-
         try:
             now = datetime.now(IST)
             market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
 
             if now <= market_open:
-                logger.info("Backfill today: market has not opened yet — skipping")
                 return
 
             kite = require_authenticated_client()
-            candle_token = self._nifty_futures_token or self._nifty_index_token
+            candle_token = sub.futures_token or sub.index_token
 
             logger.info(
-                "Backfilling today's candles from market open | from=%s to=%s token=%s",
+                "Backfilling today's candles | %s | from=%s to=%s token=%s",
+                sub.instrument_name,
                 market_open.strftime("%H:%M"), now.strftime("%H:%M"), candle_token,
             )
 
@@ -241,10 +326,8 @@ class MarketDataService:
             )
 
             if not historical:
-                logger.info("Backfill today: no historical candles returned")
                 return
 
-            # Exclude the still-open current candle slot
             current_slot_start = now.replace(
                 minute=(now.minute // 5) * 5, second=0, microsecond=0
             )
@@ -254,23 +337,19 @@ class MarketDataService:
                 if hasattr(ts, "astimezone"):
                     ts = ts.astimezone(IST)
                 if ts >= current_slot_start:
-                    continue   # incomplete candle — skip
+                    continue
                 new_candles.append(Candle(
                     timestamp=ts,
-                    open=row["open"],
-                    high=row["high"],
-                    low=row["low"],
-                    close=row["close"],
+                    open=row["open"], high=row["high"],
+                    low=row["low"],  close=row["close"],
                     volume=row.get("volume", 0),
                 ))
 
             if not new_candles:
-                logger.info("Backfill today: no completed candles to inject")
                 return
 
-            with get_lock():
-                raw = get_raw_state()
-                # Merge: skip any timestamps already collected via live ticks
+            with sub.get_lock_fn():
+                raw = sub.get_raw_state_fn()
                 existing_times = {c.timestamp for c in raw.candles}
                 to_add = [c for c in new_candles if c.timestamp not in existing_times]
                 raw.candles.extend(to_add)
@@ -279,42 +358,35 @@ class MarketDataService:
                     raw.last_candle_time = raw.candles[-1].timestamp
 
             logger.info(
-                "Today backfill complete: %d candles injected | %s → %s",
-                len(new_candles),
+                "Today backfill complete | %s | %d candles | %s → %s",
+                sub.instrument_name, len(new_candles),
                 new_candles[0].timestamp.strftime("%H:%M"),
                 new_candles[-1].timestamp.strftime("%H:%M"),
             )
 
         except Exception as e:
-            logger.warning("Today candle backfill failed (non-fatal): %s", e)
+            logger.warning("Today candle backfill failed (%s, non-fatal): %s", sub.instrument_name, e)
 
-    def _backfill_missing_candles(self) -> None:
-        """
-        Called in a background thread after reconnect.
-        Fetches completed 5-min candles from Kite historical API for the gap
-        between the last locally-known candle and now, then injects them into state.
-        """
+    def _backfill_missing_candles(self, sub: InstrumentSubscription) -> None:
+        """Fetch candles missed during a WebSocket reconnect gap."""
         from services.kite_service import require_authenticated_client
-
         try:
-            state = get_state()
+            state = sub.get_state_fn()
             last_candle_time = state.last_candle_time
             if last_candle_time is None:
                 return
 
             now = datetime.now(IST)
-            # Start fetching from the candle slot AFTER the last one we already have
             from_dt = last_candle_time + timedelta(minutes=5)
             if from_dt >= now:
-                logger.info("Reconnect: no missing candles — last candle is recent")
                 return
 
             kite = require_authenticated_client()
-            candle_token = self._nifty_futures_token or self._nifty_index_token
+            candle_token = sub.futures_token or sub.index_token
 
             logger.info(
-                "Backfilling missed candles after reconnect | from=%s to=%s token=%s",
-                from_dt.strftime("%H:%M"), now.strftime("%H:%M"), candle_token,
+                "Backfilling missed candles after reconnect | %s | from=%s to=%s",
+                sub.instrument_name, from_dt.strftime("%H:%M"), now.strftime("%H:%M"),
             )
 
             historical = kite.historical_data(
@@ -325,10 +397,8 @@ class MarketDataService:
             )
 
             if not historical:
-                logger.info("Backfill: no historical candles returned")
                 return
 
-            # Exclude the current incomplete candle (its slot hasn't closed yet)
             current_slot_start = now.replace(
                 minute=(now.minute // 5) * 5, second=0, microsecond=0
             )
@@ -338,72 +408,71 @@ class MarketDataService:
                 if hasattr(ts, "astimezone"):
                     ts = ts.astimezone(IST)
                 if ts >= current_slot_start:
-                    continue   # incomplete candle — skip
+                    continue
                 new_candles.append(Candle(
                     timestamp=ts,
-                    open=row["open"],
-                    high=row["high"],
-                    low=row["low"],
-                    close=row["close"],
+                    open=row["open"], high=row["high"],
+                    low=row["low"],  close=row["close"],
                     volume=row.get("volume", 0),
                 ))
 
             if not new_candles:
-                logger.info("Backfill: all returned candles are incomplete or already held")
                 return
 
-            with get_lock():
-                raw = get_raw_state()
+            with sub.get_lock_fn():
+                raw = sub.get_raw_state_fn()
                 raw.candles.extend(new_candles)
                 raw.candles.sort(key=lambda c: c.timestamp)
                 raw.last_candle_time = raw.candles[-1].timestamp
 
             logger.info(
-                "Backfill complete: %d candles injected | %s → %s",
-                len(new_candles),
+                "Backfill complete | %s | %d candles | %s → %s",
+                sub.instrument_name, len(new_candles),
                 new_candles[0].timestamp.strftime("%H:%M"),
                 new_candles[-1].timestamp.strftime("%H:%M"),
             )
 
         except Exception as e:
-            logger.warning("Candle backfill failed (non-fatal): %s", e)
+            logger.warning("Candle backfill failed (%s, non-fatal): %s", sub.instrument_name, e)
 
     def _on_ticks(self, ws, ticks: list[dict]) -> None:
         if not self._running:
             return
 
-        # Determine which token to use for candle building:
-        # Prefer futures (has real volume) over index (no volume)
-        candle_token = self._nifty_futures_token or self._nifty_index_token
-
         for tick in ticks:
             token = tick.get("instrument_token")
-            ltp = tick.get("last_price", 0)
+            ltp   = tick.get("last_price", 0)
 
-            if token == self._nifty_index_token:
-                # Always update spot price from index (official Nifty level)
-                if self._spot_callback and ltp > 0:
-                    self._spot_callback(ltp)
+            instrument_name = self._token_to_instrument.get(token)
+            if not instrument_name:
+                continue
 
-                # Build candles from index ONLY if no futures available
-                if candle_token == self._nifty_index_token:
-                    self._process_candle_tick(tick, ltp)
+            sub = self._subscriptions.get(instrument_name)
+            if not sub:
+                continue
 
-            elif token == self._nifty_futures_token:
-                # Build candles from futures (real volume + OI)
-                self._process_candle_tick(tick, ltp)
-                # Track futures LTP separately for UI comparison — do NOT use as spot
+            candle_token = sub.futures_token or sub.index_token
+
+            if token == sub.index_token:
+                # Spot price from index (official level)
+                if sub.spot_callback and ltp > 0:
+                    sub.spot_callback(ltp)
+                # Build candles from index only when no futures available
+                if candle_token == sub.index_token:
+                    self._process_candle_tick(tick, ltp, sub)
+
+            elif token == sub.futures_token:
+                # Build candles from futures (real volume)
+                self._process_candle_tick(tick, ltp, sub)
                 if ltp > 0:
-                    from services.trading_state import update_state
-                    update_state(nifty_futures_ltp=ltp)
+                    sub.update_state_fn(nifty_futures_ltp=ltp)
 
-            elif token in self._option_tokens:
-                # Option LTP update for P&L monitoring
-                if self._option_ltp_callback and ltp > 0:
-                    self._option_ltp_callback(token, ltp)
+            else:
+                # Option LTP
+                if sub.option_ltp_callback and ltp > 0:
+                    sub.option_ltp_callback(token, ltp)
 
-    def _process_candle_tick(self, tick: dict, ltp: float) -> None:
-        """Build 5-min candle from a tick (index or futures)."""
+    def _process_candle_tick(self, tick: dict, ltp: float, sub: InstrumentSubscription) -> None:
         volume = tick.get("volume_traded", 0)
         ts_raw = tick.get("timestamp") or tick.get("last_trade_time")
         if ts_raw:
@@ -412,35 +481,45 @@ class MarketDataService:
             ts = datetime.now(IST)
 
         if ltp > 0:
-            candle = self._nifty_builder.process_tick(ltp, volume or 0, ts)
-            if candle and self._candle_callback:
+            candle = sub.candle_builder.process_tick(ltp, volume or 0, ts)
+            if candle and sub.candle_callback:
                 logger.info(
-                    "5-min candle closed | %s O=%.2f H=%.2f L=%.2f C=%.2f V=%d",
-                    candle.timestamp.strftime("%H:%M"),
-                    candle.open, candle.high, candle.low, candle.close,
-                    candle.volume,
+                    "5-min candle closed | %s %s O=%.2f H=%.2f L=%.2f C=%.2f V=%d",
+                    sub.instrument_name, candle.timestamp.strftime("%H:%M"),
+                    candle.open, candle.high, candle.low, candle.close, candle.volume,
                 )
-                self._candle_callback(candle)
+                sub.candle_callback(candle)
 
     def _on_close(self, ws, code, reason) -> None:
         logger.warning("WebSocket closed | code=%s reason=%s | will attempt reconnect", code, reason)
-        update_state(error_message=f"WebSocket disconnected (reconnecting...): {reason}")
-        # Do NOT set self._running = False here — KiteTicker will reconnect automatically.
-        # _running is only set False in stop() (intentional) or _on_noreconnect (all retries exhausted).
+        for sub in self._subscriptions.values():
+            sub.update_state_fn(error_message=f"WebSocket disconnected (reconnecting...): {reason}")
 
     def _on_error(self, ws, code, reason) -> None:
         logger.error("WebSocket error | code=%s reason=%s", code, reason)
-        update_state(error_message=f"WebSocket error: {reason}")
+        for sub in self._subscriptions.values():
+            sub.update_state_fn(error_message=f"WebSocket error: {reason}")
 
     def _on_reconnect(self, ws, attempt_count) -> None:
         logger.info("WebSocket reconnecting | attempt=%d", attempt_count)
-        # Restore running flag in case it was cleared by a previous close
         with self._lock:
             self._running = True
-        update_state(error_message=None)
+        for sub in self._subscriptions.values():
+            sub.update_state_fn(error_message=None)
 
     def _on_noreconnect(self, ws) -> None:
-        logger.error("WebSocket reconnection failed permanently — all retries exhausted")
+        logger.error("WebSocket reconnection failed permanently")
         with self._lock:
             self._running = False
-        update_state(error_message="WebSocket reconnection failed. Please restart the engine.")
+        for sub in self._subscriptions.values():
+            sub.update_state_fn(error_message="WebSocket reconnection failed. Please restart the engine.")
+
+
+# ---------------------------------------------------------------------------
+# Module-level shared singleton — both engines use this one instance
+# ---------------------------------------------------------------------------
+_shared_market_data = MarketDataService()
+
+
+def get_market_data_service() -> MarketDataService:
+    return _shared_market_data
