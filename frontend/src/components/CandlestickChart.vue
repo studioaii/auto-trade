@@ -108,13 +108,20 @@ class CandleChart {
     const bw = Math.max(1, Math.floor(cw * 0.6))
     const toX = i => PL + i * cw + cw / 2
 
-    // ── Price range: driven by CANDLE data only (open/high/low/close)
-    // VWAP and EMA do NOT control the Y scale — they get clipped if out of range.
-    // This prevents a distant EMA or VWAP from compressing visible candles.
-    let lo = Infinity, hi = -Infinity
+    // ── Price range: OHLC sets the base; EMA20/VWAP can extend it by at most 1× the candle range
+    let candleLo = Infinity, candleHi = -Infinity
     for (const c of candles) {
       const vals = [c.high, c.low, c.open, c.close].filter(v => v != null && isFinite(v))
-      for (const v of vals) { lo = Math.min(lo, v); hi = Math.max(hi, v) }
+      for (const v of vals) { candleLo = Math.min(candleLo, v); candleHi = Math.max(candleHi, v) }
+    }
+    const candleRange = candleHi - candleLo || 1
+    let lo = candleLo, hi = candleHi
+    for (const c of candles) {
+      for (const v of [c.ema20, c.vwap]) {
+        if (v == null || !isFinite(v)) continue
+        lo = Math.min(lo, Math.max(candleLo - candleRange, v))
+        hi = Math.max(hi, Math.min(candleHi + candleRange, v))
+      }
     }
     if (!isFinite(lo) || !isFinite(hi)) return
 

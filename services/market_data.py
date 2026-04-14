@@ -98,12 +98,14 @@ class MarketDataService:
         self._ticker: Optional[KiteTicker] = None
         self._api_key: str = ""
         self._access_token: str = ""
-        self._running: bool = False
+        self._running: bool = False   # True once start() has been called
+        self._connected: bool = False  # True only when WebSocket is live
         self._lock = threading.Lock()
         # instrument_name -> InstrumentSubscription
         self._subscriptions: dict[str, InstrumentSubscription] = {}
         # token -> instrument_name (fast routing)
         self._token_to_instrument: dict[int, str] = {}
+        self._watchdog_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -112,7 +114,8 @@ class MarketDataService:
     def start(self, api_key: str, access_token: str, subscription: InstrumentSubscription) -> None:
         """
         Register an instrument and start the WebSocket if not already running.
-        If already running, subscribe the new instrument's tokens immediately.
+        If already running and connected, subscribe the new instrument immediately.
+        If connecting (running but not yet connected), _on_connect will pick it up.
         """
         with self._lock:
             self._api_key = api_key
@@ -120,27 +123,83 @@ class MarketDataService:
             self._add_subscription_locked(subscription)
 
             if self._running:
-                # Ticker already up — subscribe new tokens immediately
-                self._subscribe_tokens_for(subscription)
-                logger.info(
-                    "Registered %s on existing WebSocket", subscription.instrument_name
-                )
+                if self._connected:
+                    # WebSocket is live — subscribe right now
+                    self._subscribe_tokens_for(subscription)
+                    logger.info(
+                        "Registered %s on existing WebSocket", subscription.instrument_name
+                    )
+                else:
+                    # Still connecting — _on_connect will subscribe all registered instruments
+                    logger.info(
+                        "Registered %s — will subscribe once WebSocket connects",
+                        subscription.instrument_name,
+                    )
                 return
 
             self._running = True
 
         # First instrument: start the ticker (outside lock)
-        ticker = KiteTicker(api_key, access_token, reconnect=True)
-        ticker.on_connect    = self._on_connect
-        ticker.on_ticks      = self._on_ticks
-        ticker.on_close      = self._on_close
-        ticker.on_error      = self._on_error
-        ticker.on_reconnect  = self._on_reconnect
+        self._start_ticker(api_key, access_token)
+
+    def _start_ticker(self, api_key: str, access_token: str) -> None:
+        """Create a fresh KiteTicker and connect it. Called outside the lock."""
+        ticker = KiteTicker(
+            api_key,
+            access_token,
+            reconnect=True,
+            reconnect_max_tries=300,    # library max — ~hours of retries with back-off
+            reconnect_max_delay=30,     # cap back-off at 30 s
+            connect_timeout=30,
+        )
+        ticker.on_connect     = self._on_connect
+        ticker.on_ticks       = self._on_ticks
+        ticker.on_close       = self._on_close
+        ticker.on_error       = self._on_error
+        ticker.on_reconnect   = self._on_reconnect
         ticker.on_noreconnect = self._on_noreconnect
 
-        self._ticker = ticker
+        with self._lock:
+            self._ticker = ticker
+
         ticker.connect(threaded=True)
-        logger.info("KiteTicker started (threaded) for %s", subscription.instrument_name)
+        logger.info("KiteTicker started (threaded)")
+
+        # Start watchdog to detect a silent hang in connection establishment
+        self._start_watchdog()
+
+    def _start_watchdog(self) -> None:
+        """Spawn a watchdog thread (only one at a time) that restarts the ticker
+        if it stays unconnected for more than 45 seconds."""
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            return
+
+        def _watch():
+            import time as _time
+            _time.sleep(45)
+            with self._lock:
+                if not self._running or self._connected:
+                    return  # all good or already stopped
+                api_key      = self._api_key
+                access_token = self._access_token
+                if not api_key or not access_token:
+                    return
+
+            logger.warning(
+                "Watchdog: WebSocket still not connected after 45 s — restarting ticker"
+            )
+            try:
+                if self._ticker:
+                    self._ticker.close()
+            except Exception:
+                pass
+            with self._lock:
+                self._ticker = None
+            self._start_ticker(api_key, access_token)
+
+        t = threading.Thread(target=_watch, name="WS-Watchdog", daemon=True)
+        self._watchdog_thread = t
+        t.start()
 
     def unregister_instrument(self, instrument_name: str) -> None:
         """
@@ -176,6 +235,7 @@ class MarketDataService:
         """Disconnect WebSocket and clear all subscriptions."""
         with self._lock:
             self._running = False
+            self._connected = False
             self._subscriptions.clear()
             self._token_to_instrument.clear()
 
@@ -259,6 +319,7 @@ class MarketDataService:
 
         # Snapshot subscriptions (avoid holding lock while doing I/O)
         with self._lock:
+            self._connected = True
             subs = list(self._subscriptions.values())
 
         for sub in subs:
@@ -492,27 +553,75 @@ class MarketDataService:
 
     def _on_close(self, ws, code, reason) -> None:
         logger.warning("WebSocket closed | code=%s reason=%s | will attempt reconnect", code, reason)
-        for sub in self._subscriptions.values():
+        with self._lock:
+            self._connected = False
+            subs = list(self._subscriptions.values())
+        for sub in subs:
             sub.update_state_fn(error_message=f"WebSocket disconnected (reconnecting...): {reason}")
 
     def _on_error(self, ws, code, reason) -> None:
         logger.error("WebSocket error | code=%s reason=%s", code, reason)
-        for sub in self._subscriptions.values():
+        with self._lock:
+            self._connected = False
+            subs = list(self._subscriptions.values())
+        for sub in subs:
             sub.update_state_fn(error_message=f"WebSocket error: {reason}")
 
     def _on_reconnect(self, ws, attempt_count) -> None:
         logger.info("WebSocket reconnecting | attempt=%d", attempt_count)
         with self._lock:
             self._running = True
-        for sub in self._subscriptions.values():
+            self._connected = False
+            subs = list(self._subscriptions.values())
+        for sub in subs:
             sub.update_state_fn(error_message=None)
 
     def _on_noreconnect(self, ws) -> None:
-        logger.error("WebSocket reconnection failed permanently")
+        """
+        Kite's built-in retry gave up — spawn our own recovery so trading
+        continues without a server restart.
+        """
+        logger.warning(
+            "KiteTicker gave up built-in retries — launching independent recovery thread"
+        )
         with self._lock:
-            self._running = False
-        for sub in self._subscriptions.values():
-            sub.update_state_fn(error_message="WebSocket reconnection failed. Please restart the engine.")
+            self._connected = False
+            api_key      = self._api_key
+            access_token = self._access_token
+            subs         = list(self._subscriptions.values())
+
+        for sub in subs:
+            sub.update_state_fn(error_message="WebSocket lost — reconnecting…")
+
+        def _recover():
+            import time as _time
+            for delay in [5, 10, 20, 30, 60]:
+                logger.info("Recovery attempt in %ds…", delay)
+                _time.sleep(delay)
+                with self._lock:
+                    if not self._running:
+                        logger.info("Recovery aborted — engines stopped")
+                        return
+                try:
+                    if self._ticker:
+                        self._ticker.close()
+                except Exception:
+                    pass
+                with self._lock:
+                    self._ticker = None
+                logger.info("Recovery: spawning new KiteTicker")
+                self._start_ticker(api_key, access_token)
+                # Wait up to 30 s for connection
+                _time.sleep(30)
+                with self._lock:
+                    if self._connected:
+                        logger.info("Recovery succeeded")
+                        for sub in subs:
+                            sub.update_state_fn(error_message=None)
+                        return
+            logger.error("Recovery exhausted all attempts")
+
+        threading.Thread(target=_recover, name="WS-Recovery", daemon=True).start()
 
 
 # ---------------------------------------------------------------------------

@@ -17,11 +17,11 @@ IST = ZoneInfo("Asia/Kolkata")
 
 INITIAL_SL_PCT      = 20.0   # Fixed SL — 20% below entry price
 
-# Trailing SL (activates at +20%, widens by 4% per additional 10% gain)
-TRAIL_TRIGGER       = 20.0   # % gain at which trailing activates
-TRAIL_GAP_BASE      = 8.0    # Starting trail gap (% below peak) at +20%
-TRAIL_GAP_STEP      = 4.0    # Gap increase per additional 10% gain
-TRAIL_GAP_MAX       = 20.0   # Cap trail gap so we don't give back too much on huge moves
+# Trailing SL (activates at +15%, tightens by 1% per additional 10% gain)
+TRAIL_TRIGGER       = 15.0   # % gain at which trailing activates
+TRAIL_GAP_BASE      = 6.0    # Starting trail gap (% below peak) at +15%
+TRAIL_GAP_STEP      = 1.0    # Gap decrease per additional 10% gain (tightens as profit grows)
+TRAIL_GAP_MIN       = 3.0    # Floor — never trail looser than 3% below peak
 
 MAX_TRADES_PER_DAY  = 2
 FORCE_EXIT_TIME     = time(15, 20)
@@ -108,10 +108,10 @@ def _update_trailing_stop(position: PositionInfo, current: float, pnl_pct: float
     Mutates position trailing stop fields. Called only from monitoring loop under lock.
 
     Trail logic:
-    - Activates when pnl_pct >= TRAIL_TRIGGER (20%)
-    - Starting gap: TRAIL_GAP_BASE (8%) below peak
-    - Each additional 10% gain widens the gap by TRAIL_GAP_STEP (4%)
-      e.g. +20% → 8%, +30% → 12%, +40% → 16%, +50% → 20% (capped)
+    - Activates when pnl_pct >= TRAIL_TRIGGER (15%)
+    - Starting gap: TRAIL_GAP_BASE (6%) below peak
+    - Each additional 10% gain tightens the gap by TRAIL_GAP_STEP (1%)
+      e.g. +15% → 6%, +25% → 5%, +35% → 4%, +45% → 3% (floored)
     - Trail SL only moves up, never down
     """
     if pnl_pct < TRAIL_TRIGGER:
@@ -123,10 +123,10 @@ def _update_trailing_stop(position: PositionInfo, current: float, pnl_pct: float
     if current > position.highest_price_seen:
         position.highest_price_seen = current
 
-    # Dynamic gap: widens by TRAIL_GAP_STEP for each 10% above TRAIL_TRIGGER
+    # Dynamic gap: tightens by TRAIL_GAP_STEP for each 10% above TRAIL_TRIGGER
     extra_steps = int((pnl_pct - TRAIL_TRIGGER) / 10)
-    trail_gap = TRAIL_GAP_BASE + extra_steps * TRAIL_GAP_STEP
-    trail_gap = min(trail_gap, TRAIL_GAP_MAX)
+    trail_gap = TRAIL_GAP_BASE - extra_steps * TRAIL_GAP_STEP
+    trail_gap = max(trail_gap, TRAIL_GAP_MIN)
 
     new_trail_sl = position.highest_price_seen * (1 - trail_gap / 100)
 
