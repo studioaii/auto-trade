@@ -15,6 +15,17 @@
       </div>
     </div>
 
+    <!-- ── DAY BLOCKED BANNER ── -->
+    <div v-if="status.day_blocked" class="day-blocked-banner">
+      <span class="blocked-icon">⛔</span>
+      <span>
+        <b>All trades blocked for today</b> — Opening RSI was
+        <b style="color:#fbbf24">{{ status.opening_rsi }}</b>,
+        which is outside the safe range (25–80).
+        BankNifty tends to whipsaw violently on extreme-open days.
+      </span>
+    </div>
+
     <!-- ── ENGINE CONTROL ── -->
     <div class="card engine-card">
       <div class="card-header">

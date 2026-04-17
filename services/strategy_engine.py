@@ -423,6 +423,13 @@ class TradingEngine:
                 "candle_source": self._futures_symbol or f"{self._instrument_name} INDEX (no volume)",
             }
 
+        opening_rsi_ob = self._cfg.get("opening_rsi_overbought", 999) if self._cfg else 999
+        opening_rsi_os = self._cfg.get("opening_rsi_oversold",   0)   if self._cfg else 0
+        day_blocked = (
+            self._opening_rsi is not None
+            and (self._opening_rsi > opening_rsi_ob or self._opening_rsi < opening_rsi_os)
+        )
+
         return {
             "instrument":        self._instrument_name,
             "strategy":          f"{self._instrument_name}_INTRADAY_VWAP_EMA_BREAKOUT",
@@ -446,6 +453,8 @@ class TradingEngine:
             "error":             state.error_message,
             "indicators":        ind_snap,
             "instruments":       instruments_info,
+            "opening_rsi":       round(self._opening_rsi, 1) if self._opening_rsi is not None else None,
+            "day_blocked":       day_blocked,
         }
 
     # ------------------------------------------------------------------
