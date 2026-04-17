@@ -109,6 +109,8 @@ class TradingEngine:
         self._monitor_thread: Optional[threading.Thread] = None
         self._kite: Optional[KiteConnect] = None
         self._paper_trade_counter = 0
+        self._opening_rsi: Optional[float] = None
+        self._last_candle_date: Optional[date_type] = None
 
     # ------------------------------------------------------------------
     # Convenience accessors that delegate to the state manager
@@ -522,6 +524,12 @@ class TradingEngine:
         if indicators.get("enough_data"):
             self._update_state(market_state=indicators["market_state"])
 
+        # Track opening RSI — reset at start of each new trading day
+        candle_date = candle.timestamp.date()
+        if candle_date != self._last_candle_date:
+            self._last_candle_date = candle_date
+            self._opening_rsi = indicators.get("rsi14")
+
         signal = Signal.NO_SIGNAL
         reason = ""
         trading_eligible = (
@@ -540,6 +548,9 @@ class TradingEngine:
                 indicators["market_state"],
                 rsi14=indicators.get("rsi14"),
                 volume_surge=indicators.get("volume_surge", True),
+                efficiency=indicators.get("efficiency_ratio", 0.0),
+                opening_rsi=self._opening_rsi,
+                cfg=self._cfg,
             )
             self._update_state(last_signal=signal.value)
 

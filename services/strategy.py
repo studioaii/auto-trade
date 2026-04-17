@@ -1,13 +1,15 @@
 """
-NIFTY_INTRADAY_VWAP_EMA_BREAKOUT strategy — v2 (optimised).
+NIFTY_INTRADAY_VWAP_EMA_BREAKOUT strategy — v3 (quality filters).
 
 Entry rules (ALL conditions must be true):
-  CE: close > VWAP (≥0.15% away), EMA20 trending up, strong bullish candle,
-      breakout (high > prev high), 2/3 candles bullish, RSI > 50,
-      volume surge ≥1.2× avg, not a spike candle
-  PE: close < VWAP (≥0.15% away), EMA20 trending down, strong bearish candle,
-      breakout (low < prev low), 2/3 candles bearish, RSI < 50,
-      volume surge ≥1.2× avg, not a spike candle
+  CE: close > VWAP (≥cfg vwap_dist_min_pct away), EMA20 trending up,
+      strong bullish candle, breakout (high > prev high), 2/3 candles bullish,
+      RSI in [rsi_min_ce, rsi_max_ce], price 0.05–0.35% above EMA20,
+      efficiency ≥ efficiency_min_ce, volume surge ≥1.2× avg, not a spike candle
+  PE: close < VWAP (≥cfg vwap_dist_min_pct away), EMA20 trending down,
+      strong bearish candle, breakout (low < prev low), 2/3 candles bearish,
+      RSI in [rsi_min_pe, rsi_max_pe], price ≥0.10% below EMA20,
+      efficiency ≥ efficiency_min_pe, volume surge ≥1.2× avg, not a spike candle
 
 Do NOT trade:
   - Sideways market (efficiency < 45% + VWAP crossings ≥2)
@@ -65,6 +67,9 @@ def generate_signal(
     market_state: str,
     rsi14: Optional[float] = None,
     volume_surge: bool = True,
+    efficiency: float = 0.0,
+    opening_rsi: Optional[float] = None,
+    cfg: Optional[dict] = None,
 ) -> tuple[Signal, str]:
     """
     Returns (Signal, reason_string).
@@ -87,6 +92,28 @@ def generate_signal(
         logger.info("Spike candle detected (range %.2f%%) — skipping", (current.high - current.low) / current.close * 100)
         return Signal.NO_SIGNAL, f"spike candle ({(current.high - current.low) / current.close * 100:.2f}% range)"
 
+    # ── Pull per-instrument thresholds from cfg (safe defaults = original behaviour) ──
+    rsi_min_ce             = cfg.get("rsi_min_ce",             50)   if cfg else 50
+    rsi_max_ce             = cfg.get("rsi_max_ce",             100)  if cfg else 100
+    rsi_min_pe             = cfg.get("rsi_min_pe",             0)    if cfg else 0
+    rsi_max_pe             = cfg.get("rsi_max_pe",             50)   if cfg else 50
+    vwap_dist_min          = cfg.get("vwap_dist_min_pct",      0.15) if cfg else 0.15
+    price_ema_gap_min_ce   = cfg.get("price_ema_gap_min_ce",   0.0)  if cfg else 0.0
+    price_ema_gap_max_ce   = cfg.get("price_ema_gap_max_ce",   999)  if cfg else 999
+    price_ema_gap_min_pe   = cfg.get("price_ema_gap_min_pe",   0.0)  if cfg else 0.0
+    price_ema_gap_max_pe   = cfg.get("price_ema_gap_max_pe",   999)  if cfg else 999
+    vwap_dist_max_pe       = cfg.get("vwap_dist_max_pe_pct",   999)  if cfg else 999
+    opening_rsi_ob         = cfg.get("opening_rsi_overbought", 999)  if cfg else 999
+    opening_rsi_os         = cfg.get("opening_rsi_oversold",   0)    if cfg else 0
+    efficiency_min_ce      = cfg.get("efficiency_min_ce",      0.0)  if cfg else 0.0
+    efficiency_min_pe      = cfg.get("efficiency_min_pe",      0.0)  if cfg else 0.0
+
+    # ── Opening day RSI bias — block dangerous sessions entirely ──────────
+    if opening_rsi is not None:
+        if opening_rsi > opening_rsi_ob or opening_rsi < opening_rsi_os:
+            logger.info("Opening RSI %.1f in danger zone — all trades blocked for the day", opening_rsi)
+            return Signal.NO_SIGNAL, f"opening RSI {opening_rsi:.1f} danger zone — day blocked"
+
     # ── COMMON FILTERS (apply before CE/PE checks) ──────────────────────
     # Volume: require above-average volume to confirm breakout
     if not volume_surge:
@@ -94,11 +121,12 @@ def generate_signal(
         return Signal.NO_SIGNAL, "low volume — no institutional participation"
 
     # VWAP distance: avoid entries hugging VWAP (reversal zone)
-    if not is_far_enough_from_vwap(current.close, vwap):
+    if not is_far_enough_from_vwap(current.close, vwap, min_pct=vwap_dist_min):
         logger.debug("Too close to VWAP (%.2f vs %.2f) — skipping", current.close, vwap)
         return Signal.NO_SIGNAL, "too close to VWAP"
 
     # ── CE (CALL) ENTRY ──────────────────────────────────────────────────
+    ce_gap_pct = (current.close - ema20) / ema20 * 100 if ema20 else 0.0
     ce_conditions = {
         "close > VWAP":            current.close > vwap,
         "EMA20 trending up":       ema_trending_up(ema20_series),
@@ -106,7 +134,9 @@ def generate_signal(
         "strong bullish candle":   is_strong_bullish(current),
         "breakout high":           current.high > prev.high,
         "2/3 candles bullish":     multi_candle_confirmation(candles, "bullish"),
-        "RSI > 50":                rsi14 is not None and rsi14 > 50,
+        "RSI in range":            rsi14 is not None and rsi_min_ce <= rsi14 <= rsi_max_ce,
+        "price-EMA gap":           price_ema_gap_min_ce <= ce_gap_pct <= price_ema_gap_max_ce,
+        "efficiency":              efficiency >= efficiency_min_ce,
     }
 
     if all(ce_conditions.values()):
@@ -120,6 +150,8 @@ def generate_signal(
         return Signal.BUY_CE, reason
 
     # ── PE (PUT) ENTRY ───────────────────────────────────────────────────
+    pe_gap_pct     = (ema20 - current.close) / ema20 * 100 if ema20 else 0.0
+    vwap_below_pct = (vwap - current.close) / vwap * 100  if vwap > 0 else 0.0
     pe_conditions = {
         "close < VWAP":            current.close < vwap,
         "EMA20 trending down":     ema_trending_down(ema20_series),
@@ -127,7 +159,10 @@ def generate_signal(
         "strong bearish candle":   is_strong_bearish(current),
         "breakout low":            current.low < prev.low,
         "2/3 candles bearish":     multi_candle_confirmation(candles, "bearish"),
-        "RSI < 50":                rsi14 is not None and rsi14 < 50,
+        "RSI in range":            rsi14 is not None and rsi_min_pe <= rsi14 <= rsi_max_pe,
+        "price-EMA gap":           price_ema_gap_min_pe <= pe_gap_pct <= price_ema_gap_max_pe,
+        "VWAP dist not extreme":   vwap_below_pct <= vwap_dist_max_pe,
+        "efficiency":              efficiency >= efficiency_min_pe,
     }
 
     if all(pe_conditions.values()):
