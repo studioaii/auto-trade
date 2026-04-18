@@ -24,6 +24,7 @@
   --accent:        #3b82f6;
   --accent-dim:    rgba(59,130,246,0.12);
   --accent-glow:   0 0 24px rgba(59,130,246,0.35);
+  --brand-grad:    linear-gradient(135deg, #1d4ed8 0%, #7c3aed 100%);
 
   /* Semantic */
   --green:         #10b981;
@@ -38,6 +39,10 @@
   --cyan:          #06b6d4;
   --cyan-dim:      rgba(6,182,212,0.12);
 
+  /* Option-type accents */
+  --ce-blue:       #60a5fa;
+  --pe-rose:       #fb7185;
+
   /* Text */
   --text-primary:  #e2e8f0;
   --text-secondary:#94a3b8;
@@ -48,10 +53,27 @@
   --radius:        10px;
   --radius-sm:     6px;
   --radius-lg:     14px;
+  --radius-pill:   100px;
   --shadow:        0 4px 32px rgba(0,0,0,0.5);
   --shadow-sm:     0 2px 8px rgba(0,0,0,0.35);
+  --font-sans:     'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono:     'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
   --transition:    0.18s ease;
+
+  /* Type scale */
+  --fs-micro:      9px;
+  --fs-tiny:       10px;
+  --fs-xs:         11px;
+  --fs-sm:         12px;
+  --fs-base:       13px;
+  --fs-md:         14px;
+  --fs-lg:         15px;
+  --fs-xl:         16px;
+  --fs-2xl:        17px;
+  --fs-3xl:        18px;
+  --fs-4xl:        22px;
+  --tracking-caps: 1px;
+  --tracking-tight:-0.4px;
 }
 
 html, body { height: 100%; }
@@ -360,6 +382,24 @@ body {
 
 .sub-ce { color: #60a5fa; }
 .sub-pe { color: #f9a8d4; }
+
+.itile-rsi-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rsi-zone-tag {
+  font-size: 8px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-family: var(--font-sans);
+  opacity: 0.85;
+}
 
 /* ──────────────────────────────────────────
    STATUS DOT

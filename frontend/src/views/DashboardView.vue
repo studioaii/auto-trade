@@ -94,17 +94,20 @@
       </div>
       <div class="itile">
         <div class="lbl">RSI 14</div>
-        <div class="val" :style="{ color: rsiColor }">{{ status.indicators?.rsi14 != null ? status.indicators.rsi14.toFixed(1) : '—' }}</div>
+        <div class="val itile-rsi-row" :style="{ color: rsiColor }">
+          {{ status.indicators?.rsi14 != null ? status.indicators.rsi14.toFixed(1) : '—' }}
+          <span v-if="status.indicators?.rsi14 != null" class="rsi-zone-tag" :style="{ color: rsiColor, borderColor: rsiColor }">{{ rsiZone }}</span>
+        </div>
       </div>
       <div class="itile">
         <div class="lbl">Vol Surge</div>
-        <div class="val" :style="{ color: status.indicators?.volume_surge ? 'var(--green)' : 'var(--red)' }">
-          {{ status.indicators?.volume_surge != null ? (status.indicators.volume_surge ? 'YES' : 'NO') : '—' }}
+        <div class="val" :style="{ color: status.indicators?.volume_surge ? 'var(--green)' : 'var(--text-muted)' }">
+          {{ status.indicators?.volume_surge != null ? (status.indicators.volume_surge ? '✓ YES' : '— NO') : '—' }}
         </div>
       </div>
       <div class="itile">
         <div class="lbl">Last Signal</div>
-        <div class="val" :style="{ color: signalColor }">{{ status.last_signal || '—' }}</div>
+        <div class="val" :style="{ color: signalColor }">{{ signalLabel }}</div>
       </div>
       <div class="itile">
         <div class="lbl">Last Candle</div>
@@ -317,12 +320,26 @@ const rsiColor = computed(() => {
   return rsi >= 70 ? 'var(--red)' : rsi <= 30 ? 'var(--green)' : 'var(--purple)'
 })
 
+const rsiZone = computed(() => {
+  const rsi = status.value.indicators?.rsi14
+  if (rsi == null) return ''
+  return rsi >= 70 ? 'OB' : rsi <= 30 ? 'OS' : 'NEUTRAL'
+})
+
 const signalColor = computed(() => {
   const sig = status.value.last_signal
   if (sig === 'BUY_CE') return '#60a5fa'
   if (sig === 'BUY_PE') return '#fb7185'
   if (sig === 'NO_SIGNAL') return 'var(--text-muted)'
   return 'var(--text-muted)'
+})
+
+const signalLabel = computed(() => {
+  const sig = status.value.last_signal
+  if (sig === 'BUY_CE') return '▲ BUY CE'
+  if (sig === 'BUY_PE') return '▼ BUY PE'
+  if (sig === 'NO_SIGNAL') return '— NO SIGNAL'
+  return sig || '—'
 })
 
 const pnlDisplay = computed(() => {
