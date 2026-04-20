@@ -1,20 +1,22 @@
 """
-NIFTY_INTRADAY_VWAP_EMA_BREAKOUT strategy — v3 (quality filters).
+NIFTY_INTRADAY_VWAP_EMA_BREAKOUT strategy — v2.
 
 Entry rules (ALL conditions must be true):
-  CE: close > VWAP (≥cfg vwap_dist_min_pct away), EMA20 trending up,
-      strong bullish candle, breakout (high > prev high), 2/3 candles bullish,
-      RSI in [rsi_min_ce, rsi_max_ce], price 0.05–0.35% above EMA20,
-      efficiency ≥ efficiency_min_ce, volume surge ≥1.2× avg, not a spike candle
-  PE: close < VWAP (≥cfg vwap_dist_min_pct away), EMA20 trending down,
-      strong bearish candle, breakout (low < prev low), 2/3 candles bearish,
-      RSI in [rsi_min_pe, rsi_max_pe], price ≥0.10% below EMA20,
-      efficiency ≥ efficiency_min_pe, volume surge ≥1.2× avg, not a spike candle
+  CE: close > VWAP (≥0.15% away), EMA20 trending up + strong slope,
+      strong bullish candle (body ≥55%), breakout (high > prev high),
+      2/3 candles bullish, RSI > 50, efficiency ≥ 0.45,
+      volume surge ≥1.2× avg, not a spike candle
+  PE: close < VWAP (≥0.15% away), EMA20 trending down + strong slope,
+      strong bearish candle (body ≥55%), breakout (low < prev low),
+      2/3 candles bearish, RSI < 50, efficiency ≥ 0.45,
+      volume surge ≥1.2× avg, not a spike candle
 
 Do NOT trade:
   - Sideways market (efficiency < 45% + VWAP crossings ≥2)
   - Spike candles (range > 1%)
   - Before 9:50 AM (skip opening noise) or after 14:00 (time-decay risk)
+
+Per-instrument thresholds are read from cfg (INSTRUMENT_CONFIG in config.py).
 """
 import logging
 from datetime import datetime, time
