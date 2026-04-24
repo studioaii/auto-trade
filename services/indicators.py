@@ -183,6 +183,23 @@ def multi_candle_confirmation(candles: list[Candle], direction: str) -> bool:
 # ---------------------------------------------------------------------------
 # Sideways detection
 # ---------------------------------------------------------------------------
+def compute_efficiency(candles: list[Candle]) -> float:
+    """
+    Efficiency ratio over last SIDEWAYS_LOOKBACK candles.
+    |net_close_move| / (max_high - min_low).
+    Returns 0.0 when data is insufficient or range is zero.
+    """
+    if len(candles) < SIDEWAYS_LOOKBACK:
+        return 0.0
+    recent = candles[-SIDEWAYS_LOOKBACK:]
+    max_high = max(c.high for c in recent)
+    min_low = min(c.low for c in recent)
+    total_range = max_high - min_low
+    if total_range == 0:
+        return 0.0
+    return abs(recent[-1].close - recent[0].close) / total_range
+
+
 def is_sideways(candles: list[Candle], vwap: float) -> bool:
     """
     Returns True if market is in a sideways/ranging state.
@@ -200,22 +217,8 @@ def is_sideways(candles: list[Candle], vwap: float) -> bool:
     if len(candles) < SIDEWAYS_LOOKBACK:
         return False
 
-    recent   = candles[-SIDEWAYS_LOOKBACK:]
-    closes   = [c.close for c in recent]
-    max_high = max(c.high for c in recent)
-    min_low  = min(c.low  for c in recent)
-
-    if min_low == 0:
-        return False
-
-    total_range = max_high - min_low
-    if total_range == 0:
-        return True  # Completely flat = sideways
-
     # Condition 1: low directional efficiency → oscillating market
-    net_move   = abs(closes[-1] - closes[0])
-    efficiency = net_move / total_range
-    if efficiency < SIDEWAYS_EFFICIENCY_MIN:
+    if compute_efficiency(candles) < SIDEWAYS_EFFICIENCY_MIN:
         return True
 
     # Condition 2: any VWAP crossing in last 5 candles → unstable/choppy
@@ -311,4 +314,5 @@ def get_latest_indicators(candles: list[Candle]) -> dict:
         "rsi14_series": rsi14_series,
         "market_state": market_state,
         "volume_surge": has_volume_surge(candles),
+        "efficiency_ratio": round(compute_efficiency(candles), 4),
     }

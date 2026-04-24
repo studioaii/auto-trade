@@ -32,6 +32,14 @@ HEADERS = [
     "multi_candle_bullish",    # 2 of last 3 candles close > open
     "multi_candle_bearish",    # 2 of last 3 candles close < open
     "efficiency_ratio",        # |net_close_move| / (max_high - min_low) over last 10
+    # Vector / delta fields — rate-of-change for momentum analysis
+    "ema_delta",               # EMA20 change from previous candle
+    "rsi_delta",               # RSI14 change from previous candle
+    "volume_ratio",            # actual ratio: current_vol / avg(last 10) — not just boolean
+    "efficiency_delta",        # efficiency change from previous candle
+    "vwap_dist_delta",         # VWAP distance % change from previous candle
+    "candle_direction",        # +1 bullish / -1 bearish / 0 doji
+    "price_momentum_pct",      # % price change from previous candle close
     # Market / signal state
     "market_state",            # TRENDING | SIDEWAYS | UNKNOWN
     "enough_data",             # True once ≥22 candles available
@@ -71,7 +79,7 @@ def log_candle(
         from services.indicators import (
             candle_body_pct, is_spike_candle,
             ema_slope_strong_up, ema_slope_strong_down,
-            multi_candle_confirmation,
+            multi_candle_confirmation, compute_efficiency,
         )
 
         ts       = candle.timestamp
@@ -82,6 +90,7 @@ def log_candle(
         candles       = state.candles
         vwap          = indicators.get("vwap") or 0.0
         ema20_series  = indicators.get("ema20_series") or []
+        rsi14_series  = indicators.get("rsi14_series") or []
 
         # ── sub-condition values ──────────────────────────────────────
         body_pct  = round(candle_body_pct(candle), 2)
@@ -92,17 +101,67 @@ def log_candle(
         m_bear    = multi_candle_confirmation(candles, "bearish") if len(candles) >= 3 else False
 
         # Efficiency ratio over last 10 candles
-        eff = ""
-        if len(candles) >= 10:
-            recent = candles[-10:]
-            rng    = max(c.high for c in recent) - min(c.low for c in recent)
-            if rng > 0:
-                eff = round(abs(recent[-1].close - recent[0].close) / rng, 4)
+        eff = indicators.get("efficiency_ratio", "")
 
         # VWAP distance %
         vwap_dist = ""
         if vwap > 0 and candle.close > 0:
             vwap_dist = round((candle.close - vwap) / vwap * 100, 4)
+
+        # ── vector / delta fields ─────────────────────────────────────
+
+        # EMA delta: change in EMA20 from previous candle
+        ema_delta = ""
+        if ema20_series:
+            ema_vals = [v for v in ema20_series if v is not None]
+            if len(ema_vals) >= 2:
+                ema_delta = round(ema_vals[-1] - ema_vals[-2], 2)
+
+        # RSI delta: change in RSI14 from previous candle
+        rsi_delta = ""
+        if rsi14_series:
+            rsi_vals = [v for v in rsi14_series if v is not None]
+            if len(rsi_vals) >= 2:
+                rsi_delta = round(rsi_vals[-1] - rsi_vals[-2], 2)
+
+        # Volume ratio: actual ratio (current vol / avg of last 10), not just True/False
+        volume_ratio = ""
+        if len(candles) >= 11:
+            recent_vols = [c.volume for c in candles[-11:-1]]
+            avg_vol = sum(recent_vols) / len(recent_vols)
+            if avg_vol > 0 and not all(v == recent_vols[0] for v in recent_vols):
+                volume_ratio = round(candles[-1].volume / avg_vol, 3)
+
+        # Efficiency delta: change in efficiency from previous candle
+        efficiency_delta = ""
+        if len(candles) >= 11:
+            eff_prev = compute_efficiency(candles[:-1])
+            eff_curr = indicators.get("efficiency_ratio")
+            if eff_curr != "" and eff_curr is not None:
+                efficiency_delta = round(float(eff_curr) - eff_prev, 4)
+
+        # VWAP distance delta: change in VWAP distance % from previous candle
+        # Uses same VWAP (cumulative intraday) as reference for both candles
+        vwap_dist_delta = ""
+        if vwap > 0 and len(candles) >= 2:
+            prev_dist = (candles[-2].close - vwap) / vwap * 100
+            curr_dist = (candle.close - vwap) / vwap * 100
+            vwap_dist_delta = round(curr_dist - prev_dist, 4)
+
+        # Candle direction: +1 bullish / -1 bearish / 0 doji
+        if candle.close > candle.open:
+            candle_direction = 1
+        elif candle.close < candle.open:
+            candle_direction = -1
+        else:
+            candle_direction = 0
+
+        # Price momentum %: close % change from previous candle
+        price_momentum_pct = ""
+        if len(candles) >= 2 and candles[-2].close > 0:
+            price_momentum_pct = round(
+                (candle.close - candles[-2].close) / candles[-2].close * 100, 4
+            )
 
         # Position snapshot
         pos = state.position
@@ -126,6 +185,13 @@ def log_candle(
             "multi_candle_bullish":   m_bull,
             "multi_candle_bearish":   m_bear,
             "efficiency_ratio":       eff,
+            "ema_delta":              ema_delta,
+            "rsi_delta":              rsi_delta,
+            "volume_ratio":           volume_ratio,
+            "efficiency_delta":       efficiency_delta,
+            "vwap_dist_delta":        vwap_dist_delta,
+            "candle_direction":       candle_direction,
+            "price_momentum_pct":     price_momentum_pct,
             "market_state":           indicators.get("market_state", ""),
             "enough_data":            indicators.get("enough_data", False),
             "signal":                 signal_value,
