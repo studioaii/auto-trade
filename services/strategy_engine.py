@@ -77,7 +77,7 @@ def _log_attempt(
             instrument=instrument,
         )
     except Exception:
-        pass
+        logger.debug("entry-attempt logging failed (non-fatal)", exc_info=True)
 
 
 class TradingEngine:
@@ -111,6 +111,9 @@ class TradingEngine:
         self._paper_trade_counter = 0
         self._opening_rsi: Optional[float] = None
         self._last_candle_date: Optional[date_type] = None
+        # Indicators cache for status polls — refreshed in _on_candle_ready
+        self._cached_indicators: dict = {}
+        self._cached_indicators_at: Optional[datetime] = None
 
     # ------------------------------------------------------------------
     # Convenience accessors that delegate to the state manager
@@ -404,15 +407,26 @@ class TradingEngine:
             }
 
         ind_snap = {}
-        if len(state.candles) >= MIN_CANDLES:
+        # Reuse the indicators computed at the most recent candle close
+        # if the cache is fresh; recompute only on a cold cache.
+        if (
+            self._cached_indicators_at is not None
+            and self._cached_indicators_at == state.last_candle_time
+            and self._cached_indicators.get("enough_data")
+        ):
+            ind = self._cached_indicators
+        elif len(state.candles) >= MIN_CANDLES:
             ind = get_latest_indicators(state.candles)
-            if ind.get("enough_data"):
-                ind_snap = {
-                    "vwap":         ind.get("vwap"),
-                    "ema20":        round(ind["ema20"], 2) if ind.get("ema20") else None,
-                    "rsi14":        round(ind["rsi14"], 2) if ind.get("rsi14") else None,
-                    "volume_surge": ind.get("volume_surge"),
-                }
+        else:
+            ind = {}
+
+        if ind.get("enough_data"):
+            ind_snap = {
+                "vwap":         ind.get("vwap"),
+                "ema20":        round(ind["ema20"], 2) if ind.get("ema20") else None,
+                "rsi14":        round(ind["rsi14"], 2) if ind.get("rsi14") else None,
+                "volume_surge": ind.get("volume_surge"),
+            }
 
         instruments_info = None
         if self._ce_instrument:
@@ -532,6 +546,8 @@ class TradingEngine:
         indicators = get_latest_indicators(state.candles)
         if indicators.get("enough_data"):
             self._update_state(market_state=indicators["market_state"])
+            self._cached_indicators = indicators
+            self._cached_indicators_at = candle.timestamp
 
         # Track opening RSI — reset at start of each new trading day
         candle_date = candle.timestamp.date()

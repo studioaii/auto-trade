@@ -1,3 +1,4 @@
+import copy
 import threading
 import logging
 from dataclasses import dataclass, field
@@ -86,8 +87,12 @@ class InstrumentStateManager:
 
     def get_state(self) -> TradingState:
         with self._lock:
-            import copy
-            return copy.copy(self._state)
+            snap = copy.copy(self._state)
+            # Detach the candle list so readers can iterate without racing
+            # against WebSocket-thread appends (Candle objects are immutable
+            # post-close, so a shallow list copy is sufficient).
+            snap.candles = list(self._state.candles)
+            return snap
 
     def update_state(self, **kwargs) -> None:
         with self._lock:
@@ -136,8 +141,9 @@ _lock = threading.Lock()
 def get_state() -> TradingState:
     """Return a shallow copy for safe reading (no lock held during use)."""
     with _lock:
-        import copy
-        return copy.copy(_state)
+        snap = copy.copy(_state)
+        snap.candles = list(_state.candles)
+        return snap
 
 
 def update_state(**kwargs) -> None:

@@ -257,12 +257,18 @@ async def _get_candles_for(instrument: str):
     """Return 5-min candles with per-candle indicators for the given instrument."""
     from services.indicators import compute_ema, compute_rsi
     from services.strategy_engine import get_engine
+    from services.market_data import get_market_data_service
+    from zoneinfo import ZoneInfo
+    from datetime import datetime as _dt
+    IST = ZoneInfo("Asia/Kolkata")
 
     engine = get_engine(instrument)
     state  = engine._state_mgr.get_state()
     candles = state.candles
+    IST_OFFSET = 19800   # 5.5 * 3600
+
     if not candles:
-        return {"candles": []}
+        return {"candles": [], "live_candle": None}
 
     today  = candles[-1].timestamp.date()
     closes = [c.close for c in candles]
@@ -271,7 +277,6 @@ async def _get_candles_for(instrument: str):
 
     vwap_cum_tp  = 0.0
     vwap_cum_vol = 0.0
-    IST_OFFSET   = 19800   # 5.5 * 3600
 
     result = []
     for i, c in enumerate(candles):
@@ -296,7 +301,30 @@ async def _get_candles_for(instrument: str):
             "is_today": is_today,
         })
 
-    return {"candles": result}
+    # Live (in-progress) candle
+    live_candle = None
+    mds = get_market_data_service()
+    raw_live = mds.get_live_candle(instrument)
+    if raw_live and raw_live["timestamp"]:
+        ts = raw_live["timestamp"]
+        now_ist = _dt.now(IST)
+        # Only surface it if it belongs to today's session
+        if ts.date() == now_ist.date() and ts.hour >= 9:
+            live_candle = {
+                "time":     int(ts.timestamp()) + IST_OFFSET,
+                "open":     raw_live["open"],
+                "high":     raw_live["high"],
+                "low":      raw_live["low"],
+                "close":    raw_live["close"],
+                "volume":   raw_live["volume"],
+                "ema20":    None,
+                "rsi14":    None,
+                "vwap":     None,
+                "is_today": True,
+                "is_live":  True,
+            }
+
+    return {"candles": result, "live_candle": live_candle}
 
 
 def _download_candle_log(date: str, instrument: str):

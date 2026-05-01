@@ -9,8 +9,9 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 
 const props = defineProps({
-  candles: { type: Array, default: () => [] },
-  marker:  { type: Object, default: null }
+  candles:    { type: Array,  default: () => [] },
+  liveCandle: { type: Object, default: null },
+  marker:     { type: Object, default: null }
 })
 
 const wrapper    = ref(null)
@@ -53,9 +54,10 @@ class CandleChart {
     this.mc = mc; this.rc = rc
     this.mctx = mc.getContext('2d')
     this.rctx = rc.getContext('2d')
-    this.candles  = []
-    this.marker   = null
-    this.hoverIdx = -1
+    this.candles    = []
+    this.liveCandle = null
+    this.marker     = null
+    this.hoverIdx   = -1
 
     mc.addEventListener('mousemove',  e => this._hover(e))
     mc.addEventListener('mouseleave', () => { this.hoverIdx = -1; this._draw() })
@@ -69,9 +71,10 @@ class CandleChart {
     this._draw()
   }
 
-  setData(candles, marker) {
-    this.candles = candles
-    this.marker  = marker
+  setData(candles, marker, liveCandle) {
+    this.candles    = liveCandle ? [...candles, liveCandle] : candles
+    this.marker     = marker
+    this.liveCandle = liveCandle
     this.resize()
   }
 
@@ -200,22 +203,38 @@ class CandleChart {
     for (let i = 0; i < n; i++) {
       const c = candles[i], x = toX(i)
       if (!isFinite(c.high) || !isFinite(c.low) || !isFinite(c.open) || !isFinite(c.close)) continue
-      const isUp = c.close >= c.open
-      const body = isUp ? '#10b981' : '#f43f5e'
-      const wick = isUp ? '#059669' : '#e11d48'
+      const isUp   = c.close >= c.open
+      const isLive = !!c.is_live
+      const body   = isUp ? '#10b981' : '#f43f5e'
+      const wick   = isUp ? '#059669' : '#e11d48'
 
       // Wick
+      ctx.globalAlpha = isLive ? 0.7 : 1
       ctx.strokeStyle = wick; ctx.lineWidth = 1
       ctx.beginPath()
       ctx.moveTo(x, toYClamped(c.high))
       ctx.lineTo(x, toYClamped(c.low))
       ctx.stroke()
 
-      // Body (open → close)
-      const yTop = toYClamped(Math.max(c.open, c.close))
-      const yBot = toYClamped(Math.min(c.open, c.close))
-      ctx.fillStyle = body
-      ctx.fillRect(x - bw/2, yTop, bw, Math.max(1, yBot - yTop))
+      // Body
+      const yTop  = toYClamped(Math.max(c.open, c.close))
+      const yBot  = toYClamped(Math.min(c.open, c.close))
+      const bodyH = Math.max(1, yBot - yTop)
+      if (isLive) {
+        // Semi-transparent fill + bright border to show it's still forming
+        ctx.globalAlpha = 0.35
+        ctx.fillStyle = body
+        ctx.fillRect(x - bw/2, yTop, bw, bodyH)
+        ctx.globalAlpha = 0.9
+        ctx.strokeStyle = body; ctx.lineWidth = 1.5; ctx.setLineDash([3, 2])
+        ctx.strokeRect(x - bw/2, yTop, bw, bodyH)
+        ctx.setLineDash([])
+      } else {
+        ctx.globalAlpha = 1
+        ctx.fillStyle = body
+        ctx.fillRect(x - bw/2, yTop, bw, bodyH)
+      }
+      ctx.globalAlpha = 1
     }
 
     // Entry marker
@@ -340,7 +359,7 @@ onMounted(() => {
   resizeObs.observe(wrapper.value)
 
   if (props.candles.length) {
-    chart.setData(props.candles, props.marker)
+    chart.setData(props.candles, props.marker, props.liveCandle)
   }
 })
 
@@ -349,9 +368,9 @@ onUnmounted(() => {
 })
 
 watch(
-  () => [props.candles, props.marker],
-  ([candles, marker]) => {
-    if (chart) chart.setData(candles, marker)
+  () => [props.candles, props.marker, props.liveCandle],
+  ([candles, marker, liveCandle]) => {
+    if (chart) chart.setData(candles, marker, liveCandle)
   },
   { deep: true }
 )

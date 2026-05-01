@@ -1,12 +1,36 @@
+import random
 import time
 import logging
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import NetworkException
 from services.trading_state import PositionInfo
 from services.strategy import Signal
 
 logger = logging.getLogger(__name__)
 
-MAX_POLL_ATTEMPTS = 15   # seconds to wait for order completion
+MAX_POLL_ATTEMPTS         = 15   # seconds to wait for order completion
+_HISTORY_NET_RETRY_LIMIT  = 3    # consecutive transient retries per poll cycle
+
+
+def _order_history_with_retry(kite: KiteConnect, order_id: str) -> list:
+    """kite.order_history wrapped with bounded backoff for transient network errors.
+
+    Raises NetworkException after _HISTORY_NET_RETRY_LIMIT consecutive failures
+    so the caller can decide whether to abandon the poll or escalate.
+    """
+    last_exc = None
+    for attempt in range(_HISTORY_NET_RETRY_LIMIT):
+        try:
+            return kite.order_history(order_id)
+        except NetworkException as exc:
+            last_exc = exc
+            backoff = min(2 ** attempt + random.uniform(0, 0.3), 6.0)
+            logger.warning(
+                "order_history transient failure (%d/%d) for %s — retrying in %.1fs: %s",
+                attempt + 1, _HISTORY_NET_RETRY_LIMIT, order_id, backoff, exc,
+            )
+            time.sleep(backoff)
+    raise last_exc  # type: ignore[misc]
 
 
 def place_entry_order(kite: KiteConnect, instrument: dict, signal: Signal) -> str:
@@ -44,7 +68,7 @@ def get_average_price(kite: KiteConnect, order_id: str) -> float:
     Raises TimeoutError if not filled within MAX_POLL_ATTEMPTS seconds.
     """
     for attempt in range(MAX_POLL_ATTEMPTS):
-        history = kite.order_history(order_id)
+        history = _order_history_with_retry(kite, order_id)
         latest = history[-1] if history else {}
         status = latest.get("status", "")
 

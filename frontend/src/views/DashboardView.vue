@@ -9,7 +9,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">
-          Auto-refresh every 5s
+          Auto-refresh every 2s
         </span>
         <div class="dot" :class="status.engine_running ? 'on' : 'off'"></div>
       </div>
@@ -154,7 +154,7 @@
       <div v-if="!todayCandles.length" class="chart-empty">
         Start the engine to see the live candlestick chart with VWAP &amp; EMA overlays.
       </div>
-      <CandlestickChart v-else :candles="todayCandles" :marker="chartMarker" />
+      <CandlestickChart v-else :candles="todayCandles" :liveCandle="liveCandle" :marker="chartMarker" />
     </div>
 
     <!-- ── PAPER TRADE LOG ── -->
@@ -264,6 +264,7 @@ import CandlestickChart from '../components/CandlestickChart.vue'
 // ─── state ─────────────────────────────────────────────────────────────────
 const status      = ref({})
 const candles     = ref([])
+const liveCandle  = ref(null)
 const trades      = ref([])
 const summary     = ref(null)
 const loading     = ref(false)
@@ -356,9 +357,10 @@ async function refreshAll() {
       fetch('/auto-trading/status'),
       fetch('/auto-trading/candles'),
     ])
-    status.value  = await sRes.json()
-    const cData   = await cRes.json()
-    candles.value = cData.candles || []
+    status.value     = await sRes.json()
+    const cData      = await cRes.json()
+    candles.value    = cData.candles     || []
+    liveCandle.value = cData.live_candle || null
   } catch (_) {}
 }
 
@@ -412,7 +414,8 @@ function downloadCandleLog() {
 onMounted(() => {
   refreshAll()
   loadTrades()
-  refreshTimer = setInterval(() => { refreshAll(); loadTrades() }, 5000)
+  refreshTimer = setInterval(refreshAll, 2000)
+  setInterval(loadTrades, 10000)
 })
 
 onUnmounted(() => {

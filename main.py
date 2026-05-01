@@ -1,6 +1,8 @@
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -8,14 +10,18 @@ from fastapi.staticfiles import StaticFiles
 from routers import auth, trading, auto_trading, backtest
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging — rotated, cwd-independent
 # ---------------------------------------------------------------------------
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trading.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("trading.log", encoding="utf-8"),
+        RotatingFileHandler(
+            _LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -27,6 +33,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Logesh Auto Trading Engine starting up")
+    from services.daily_scheduler import get_scheduler
+    get_scheduler().start()
     yield
     logger.info("Logesh Auto Trading Engine shutting down")
     from services.strategy_engine import get_nifty_engine, get_banknifty_engine
@@ -38,8 +46,8 @@ async def lifespan(app: FastAPI):
                 if eng.get_status()["engine_running"]:
                     eng.stop(kite)
                     logger.info("%s engine stopped on shutdown", eng._instrument_name)
-        except Exception as e:
-            logger.warning("Could not cleanly stop engines on shutdown: %s", e)
+        except Exception:
+            logger.warning("Could not cleanly stop engines on shutdown", exc_info=True)
 
 
 app = FastAPI(

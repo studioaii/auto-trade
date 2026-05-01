@@ -215,6 +215,10 @@ def log_candle(
         logger.warning("Candle log write failed (non-fatal): %s", e)
 
 
+# (path → (mtime, row_count)) — invalidated when the file's mtime changes
+_ROW_COUNT_CACHE: dict[str, tuple[float, int]] = {}
+
+
 def list_log_files(instrument: str = "") -> list[dict]:
     """Return metadata for all available candle log CSVs, optionally filtered by instrument."""
     if not os.path.isdir(LOG_DIR):
@@ -238,7 +242,13 @@ def list_log_files(instrument: str = "") -> list[dict]:
         if instrument and inst != instrument.upper():
             continue
         size_kb = round(os.path.getsize(path) / 1024, 1)
-        with open(path) as f:
-            rows = max(0, sum(1 for _ in f) - 1)
+        mtime   = os.path.getmtime(path)
+        cached  = _ROW_COUNT_CACHE.get(path)
+        if cached and cached[0] == mtime:
+            rows = cached[1]
+        else:
+            with open(path) as f:
+                rows = max(0, sum(1 for _ in f) - 1)
+            _ROW_COUNT_CACHE[path] = (mtime, rows)
         files.append({"date": date_str, "instrument": inst, "rows": rows, "size_kb": size_kb, "path": path})
     return files

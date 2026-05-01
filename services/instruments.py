@@ -1,4 +1,5 @@
 import logging
+import threading
 from datetime import date, timedelta
 from typing import Optional
 from kiteconnect import KiteConnect
@@ -7,6 +8,26 @@ logger = logging.getLogger(__name__)
 
 # Nifty 50 index instrument token — static, never changes on NSE/Kite
 NIFTY_INDEX_TOKEN = 256265
+
+# ---------------------------------------------------------------------------
+# Daily-cached NFO instrument dump (shared across engines).
+# Kite refreshes the master at ~03:00 IST; one fetch per day is enough.
+# ---------------------------------------------------------------------------
+_NFO_LOCK = threading.Lock()
+_NFO_CACHE: dict = {"date": None, "data": None}
+
+
+def _get_nfo_instruments(kite: KiteConnect) -> list[dict]:
+    today = date.today()
+    with _NFO_LOCK:
+        if _NFO_CACHE["date"] == today and _NFO_CACHE["data"] is not None:
+            return _NFO_CACHE["data"]
+    data = kite.instruments("NFO")
+    with _NFO_LOCK:
+        _NFO_CACHE["date"] = today
+        _NFO_CACHE["data"] = data
+    logger.info("NFO instrument dump cached (%d rows) for %s", len(data), today)
+    return data
 NIFTY_STRIKE_INTERVAL = 50   # Nifty options strike gap
 
 # BankNifty index instrument token
@@ -23,8 +44,8 @@ def fetch_instruments(kite: KiteConnect, instrument_name: str) -> list[dict]:
     Downloads full NFO instrument dump and filters to current-week
     CE/PE options for the given instrument name (e.g. "NIFTY", "BANKNIFTY").
     """
-    logger.info("Fetching NFO instruments for %s (this may take 2-3s)...", instrument_name)
-    all_instruments = kite.instruments("NFO")
+    logger.info("Fetching NFO instruments for %s ...", instrument_name)
+    all_instruments = _get_nfo_instruments(kite)
 
     expiry = get_current_expiry_for_instrument(all_instruments, instrument_name)
     logger.info("%s target expiry: %s", instrument_name, expiry)
@@ -101,7 +122,7 @@ def find_futures(kite: KiteConnect, instrument_name: str) -> dict:
     Futures have real volume & open interest — ideal for candle building.
     """
     today = date.today()
-    all_nfo = kite.instruments("NFO")
+    all_nfo = _get_nfo_instruments(kite)
 
     futures = [
         inst for inst in all_nfo

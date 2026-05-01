@@ -13,10 +13,22 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
 
+def _is_market_hours_now() -> bool:
+    """True when current IST time is within NSE market hours (09:15–15:30, weekdays)."""
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return 9 * 60 + 15 <= minutes <= 15 * 60 + 30
+
+
 class CandleBuilder:
     """
     Aggregates live ticks into 5-minute OHLC candles.
     Candle boundaries: every slot where minute // 5 * 5 changes.
+
+    Kite volume_traded is cumulative daily volume. We track the last seen value
+    and use only the delta (per-tick volume) so candle volumes match historical data.
     """
 
     def __init__(self):
@@ -27,22 +39,51 @@ class CandleBuilder:
         self._volume: int = 0
         self._candle_slot: Optional[int] = None
         self._candle_start: Optional[datetime] = None
+        self._last_cum_volume: int = 0
+        self._vol_initialized: bool = False  # True after first tick establishes baseline
 
     def _current_slot(self, ts: datetime) -> int:
         return (ts.minute // 5) * 5
 
-    def process_tick(self, price: float, volume: int, timestamp: datetime) -> Optional[Candle]:
+    def _tick_volume_delta(self, cum_volume: int) -> int:
+        """Convert cumulative daily volume to per-tick delta volume.
+
+        The first tick after (re)start carries the full day's cumulative volume
+        since 9:15 — we must NOT add that to a candle.  We store it as the
+        baseline and return 0, so only incremental volume from subsequent ticks
+        is counted.  This keeps live candle volumes consistent with historical data.
+        """
+        if cum_volume <= 0:
+            return 0                        # index ticks have no real volume
+
+        if not self._vol_initialized:
+            # First real tick — set baseline only, contribute 0 to candle
+            self._last_cum_volume = cum_volume
+            self._vol_initialized = True
+            return 0
+
+        if cum_volume < self._last_cum_volume:
+            # New trading day — cumulative reset to 0 and climbing again
+            delta = cum_volume
+        else:
+            delta = cum_volume - self._last_cum_volume
+
+        self._last_cum_volume = cum_volume
+        return max(0, delta)
+
+    def process_tick(self, price: float, cum_volume: int, timestamp: datetime) -> Optional[Candle]:
+        tick_vol = self._tick_volume_delta(cum_volume)
         slot = self._current_slot(timestamp)
 
         if self._candle_slot is None:
-            self._start_new_candle(price, volume, timestamp, slot)
+            self._start_new_candle(price, tick_vol, timestamp, slot)
             return None
 
         if slot == self._candle_slot:
             self._high = max(self._high, price)
             self._low = min(self._low, price)
             self._close = price
-            self._volume += volume
+            self._volume += tick_vol
             return None
 
         completed = Candle(
@@ -53,17 +94,30 @@ class CandleBuilder:
             close=self._close,
             volume=self._volume,
         )
-        self._start_new_candle(price, volume, timestamp, slot)
+        self._start_new_candle(price, tick_vol, timestamp, slot)
         return completed
 
-    def _start_new_candle(self, price: float, volume: int, timestamp: datetime, slot: int):
+    def _start_new_candle(self, price: float, tick_vol: int, timestamp: datetime, slot: int):
         self._open = price
         self._high = price
         self._low = price
         self._close = price
-        self._volume = volume
+        self._volume = tick_vol
         self._candle_slot = slot
         self._candle_start = timestamp.replace(minute=slot, second=0, microsecond=0)
+
+    def get_live_candle(self) -> Optional[dict]:
+        """Return the in-progress candle data, or None if no tick received yet."""
+        if self._candle_slot is None or self._candle_start is None:
+            return None
+        return {
+            "timestamp": self._candle_start,
+            "open":   self._open,
+            "high":   self._high,
+            "low":    self._low,
+            "close":  self._close,
+            "volume": self._volume,
+        }
 
 
 @dataclass
@@ -106,6 +160,11 @@ class MarketDataService:
         # token -> instrument_name (fast routing)
         self._token_to_instrument: dict[int, str] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
+        self._disconnected_at: Optional[float] = None   # monotonic time of last disconnect
+        self._monitor_thread: Optional[threading.Thread] = None
+        # Tick-liveness watchdog: monotonic timestamp of the most recent tick batch.
+        # None = no clock yet (fresh start or just after a forced restart).
+        self._last_tick_at: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -165,41 +224,89 @@ class MarketDataService:
         ticker.connect(threaded=True)
         logger.info("KiteTicker started (threaded)")
 
-        # Start watchdog to detect a silent hang in connection establishment
-        self._start_watchdog()
+        # Start persistent connection monitor (only one per service lifetime)
+        self._start_connection_monitor()
 
-    def _start_watchdog(self) -> None:
-        """Spawn a watchdog thread (only one at a time) that restarts the ticker
-        if it stays unconnected for more than 45 seconds."""
-        if self._watchdog_thread and self._watchdog_thread.is_alive():
+    def _start_connection_monitor(self) -> None:
+        """Persistent daemon thread that watches for disconnections and reconnects.
+
+        Checks every 15 s. If the WebSocket has been down for ≥ 45 s (covers
+        network switches, ISP drops, WiFi→hotspot swaps) it closes the stale
+        ticker and spawns a fresh one — regardless of what caused the drop.
+        Runs for the lifetime of the service; a second call is a no-op.
+        """
+        if self._monitor_thread and self._monitor_thread.is_alive():
             return
 
-        def _watch():
+        def _monitor():
             import time as _time
-            _time.sleep(45)
-            with self._lock:
-                if not self._running or self._connected:
-                    return  # all good or already stopped
-                api_key      = self._api_key
-                access_token = self._access_token
-                if not api_key or not access_token:
-                    return
+            GRACE      = 45.0   # seconds disconnected before forcing a new ticker
+            CHECK      = 15.0   # polling interval
+            TICK_STALL = 60.0   # seconds without ticks during market hours = silent stall
 
-            logger.warning(
-                "Watchdog: WebSocket still not connected after 45 s — restarting ticker"
-            )
-            try:
-                if self._ticker:
-                    self._ticker.close()
-            except Exception:
-                pass
-            with self._lock:
-                self._ticker = None
-            self._start_ticker(api_key, access_token)
+            while True:
+                _time.sleep(CHECK)
 
-        t = threading.Thread(target=_watch, name="WS-Watchdog", daemon=True)
-        self._watchdog_thread = t
+                stall_silence: Optional[float] = None
+                disconn_elapsed: Optional[float] = None
+
+                with self._lock:
+                    if not self._running:
+                        return  # service stopped — exit thread
+                    api_key      = self._api_key
+                    access_token = self._access_token
+
+                    if self._connected:
+                        self._disconnected_at = None
+                        # Silent-stall check: socket reports connected but no ticks flowing.
+                        # Only act during market hours to avoid pointless restarts pre-/post-market.
+                        last_tick = self._last_tick_at
+                        if last_tick is not None and _is_market_hours_now():
+                            silence = _time.monotonic() - last_tick
+                            if silence >= TICK_STALL:
+                                stall_silence = silence
+                    else:
+                        # Not connected — record when we first noticed
+                        if self._disconnected_at is None:
+                            self._disconnected_at = _time.monotonic()
+                        elapsed = _time.monotonic() - self._disconnected_at
+                        if elapsed >= GRACE:
+                            disconn_elapsed = elapsed
+
+                if stall_silence is None and disconn_elapsed is None:
+                    continue  # nothing to do this tick
+
+                if stall_silence is not None:
+                    logger.info(
+                        "Tick stall detected — no ticks for %.0f seconds, forcing reconnect",
+                        stall_silence,
+                    )
+                else:
+                    logger.warning(
+                        "ConnectionMonitor: WebSocket down for %.0f s — forcing fresh ticker",
+                        disconn_elapsed,
+                    )
+
+                # Kill the stale ticker (it may be stuck retrying the old interface)
+                try:
+                    if self._ticker:
+                        self._ticker.close()
+                except Exception:
+                    logger.debug("ConnectionMonitor: ticker close raised (best-effort)", exc_info=True)
+                with self._lock:
+                    self._ticker = None
+                    self._disconnected_at = None   # reset so we don't spam
+                    self._last_tick_at = None      # clean clock for the new ticker
+                    self._connected = False        # gate further restarts via GRACE path
+
+                if api_key and access_token:
+                    self._start_ticker(api_key, access_token)
+                    logger.info("ConnectionMonitor: new ticker spawned")
+
+        t = threading.Thread(target=_monitor, name="WS-ConnectionMonitor", daemon=True)
+        self._monitor_thread = t
         t.start()
+        logger.info("ConnectionMonitor started (check=15s grace=45s)")
 
     def unregister_instrument(self, instrument_name: str) -> None:
         """
@@ -246,6 +353,37 @@ class MarketDataService:
                 logger.warning("Error closing ticker: %s", e)
             self._ticker = None
         logger.info("KiteTicker stopped")
+
+    def get_live_candle(self, instrument_name: str) -> Optional[dict]:
+        """Return the in-progress candle for an instrument, or None."""
+        with self._lock:
+            sub = self._subscriptions.get(instrument_name)
+        if sub is None:
+            return None
+        return sub.candle_builder.get_live_candle()
+
+    def force_reconnect(self) -> None:
+        """Close existing ticker and spawn a fresh one — used by health-check watchdog."""
+        with self._lock:
+            if not self._running:
+                return
+            api_key      = self._api_key
+            access_token = self._access_token
+
+        logger.info("force_reconnect: closing existing ticker")
+        try:
+            if self._ticker:
+                self._ticker.close()
+        except Exception:
+            logger.debug("force_reconnect: ticker close raised (best-effort)", exc_info=True)
+
+        with self._lock:
+            self._ticker    = None
+            self._connected = False
+
+        if api_key and access_token:
+            self._start_ticker(api_key, access_token)
+            logger.info("force_reconnect: new ticker spawned")
 
     def swap_option_subscriptions(
         self, instrument_name: str, old_tokens: list[int], new_tokens: list[int]
@@ -313,6 +451,7 @@ class MarketDataService:
     # ------------------------------------------------------------------
 
     def _on_connect(self, ws, response) -> None:
+        import time as _time
         all_tokens = []
         full_mode_tokens = []
         ltp_mode_tokens = []
@@ -320,6 +459,8 @@ class MarketDataService:
         # Snapshot subscriptions (avoid holding lock while doing I/O)
         with self._lock:
             self._connected = True
+            self._disconnected_at = None   # clear disconnect timer on successful connect
+            self._last_tick_at = _time.monotonic()  # start tick-liveness clock
             subs = list(self._subscriptions.values())
 
         for sub in subs:
@@ -500,6 +641,10 @@ class MarketDataService:
         if not self._running:
             return
 
+        # Tick-liveness watchdog — single atomic write, no lock needed (CPython GIL).
+        import time as _time
+        self._last_tick_at = _time.monotonic()
+
         for tick in ticks:
             token = tick.get("instrument_token")
             ltp   = tick.get("last_price", 0)
@@ -552,17 +697,23 @@ class MarketDataService:
                 sub.candle_callback(candle)
 
     def _on_close(self, ws, code, reason) -> None:
+        import time as _time
         logger.warning("WebSocket closed | code=%s reason=%s | will attempt reconnect", code, reason)
         with self._lock:
             self._connected = False
+            if self._disconnected_at is None:
+                self._disconnected_at = _time.monotonic()
             subs = list(self._subscriptions.values())
         for sub in subs:
             sub.update_state_fn(error_message=f"WebSocket disconnected (reconnecting...): {reason}")
 
     def _on_error(self, ws, code, reason) -> None:
+        import time as _time
         logger.error("WebSocket error | code=%s reason=%s", code, reason)
         with self._lock:
             self._connected = False
+            if self._disconnected_at is None:
+                self._disconnected_at = _time.monotonic()
             subs = list(self._subscriptions.values())
         for sub in subs:
             sub.update_state_fn(error_message=f"WebSocket error: {reason}")
@@ -606,7 +757,7 @@ class MarketDataService:
                     if self._ticker:
                         self._ticker.close()
                 except Exception:
-                    pass
+                    logger.debug("recovery: ticker close raised (best-effort)", exc_info=True)
                 with self._lock:
                     self._ticker = None
                 logger.info("Recovery: spawning new KiteTicker")

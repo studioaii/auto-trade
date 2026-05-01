@@ -34,8 +34,8 @@ def _save_token_to_file() -> None:
     try:
         with open(_TOKEN_FILE, "w") as f:
             json.dump(_token_store, f)
-    except Exception as e:
-        logger.warning("Could not persist token: %s", e)
+    except Exception:
+        logger.warning("Could not persist token", exc_info=True)
 
 
 # Load on import (runs on every server start / reload)

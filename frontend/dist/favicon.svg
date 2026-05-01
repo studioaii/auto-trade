@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="6" fill="#0f172a"/>
+  <!-- Candlestick chart -->
+  <!-- Candle 1 (red) -->
+  <rect x="5" y="18" width="4" height="8" rx="1" fill="#ef4444"/>
+  <line x1="7" y1="14" x2="7" y2="18" stroke="#ef4444" stroke-width="1.5"/>
+  <line x1="7" y1="26" x2="7" y2="28" stroke="#ef4444" stroke-width="1.5"/>
+  <!-- Candle 2 (green) -->
+  <rect x="12" y="12" width="4" height="9" rx="1" fill="#22c55e"/>
+  <line x1="14" y1="8" x2="14" y2="12" stroke="#22c55e" stroke-width="1.5"/>
+  <line x1="14" y1="21" x2="14" y2="24" stroke="#22c55e" stroke-width="1.5"/>
+  <!-- Candle 3 (green) -->
+  <rect x="19" y="8" width="4" height="10" rx="1" fill="#22c55e"/>
+  <line x1="21" y1="5" x2="21" y2="8" stroke="#22c55e" stroke-width="1.5"/>
+  <line x1="21" y1="18" x2="21" y2="21" stroke="#22c55e" stroke-width="1.5"/>
+  <!-- Trend line -->
+  <polyline points="7,16 14,11 21,7" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="2,1"/>
+</svg>
