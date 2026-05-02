@@ -3,6 +3,7 @@ Multi-instrument VWAP+EMA Breakout Trading Engine.
 Supports NIFTY and BANKNIFTY independently with a shared WebSocket.
 PAPER mode: simulates trades, logs to CSV. LIVE mode: places real Kite orders.
 """
+import copy
 import time as time_module
 import logging
 import threading
@@ -26,7 +27,7 @@ from services.instruments import (
 from services.indicators import get_latest_indicators, MIN_CANDLES, candle_body_pct
 from services.strategy import (
     Signal, generate_signal, detect_opposite_signal,
-    is_market_open_and_ready, is_force_exit_time,
+    is_market_open_and_ready,
 )
 from services.order_service import (
     place_entry_order, get_average_price, place_exit_order, verify_position_exists,
@@ -114,6 +115,10 @@ class TradingEngine:
         # Indicators cache for status polls — refreshed in _on_candle_ready
         self._cached_indicators: dict = {}
         self._cached_indicators_at: Optional[datetime] = None
+        # Serialises concurrent start() calls (C1)
+        self._start_lock = threading.Lock()
+        # Monotonic timestamp of last tick for the open position (H5)
+        self._last_position_tick_at: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Convenience accessors that delegate to the state manager
@@ -193,6 +198,7 @@ class TradingEngine:
                 prev_day = today - timedelta(days=1)
                 seed_candles: list[Candle] = []
 
+                # Accumulate across multiple previous days until we have seed_count candles (H6).
                 for _ in range(10):
                     while prev_day.weekday() >= 5:
                         prev_day -= timedelta(days=1)
@@ -221,18 +227,17 @@ class TradingEngine:
                                 volume=row.get("volume", 0),
                             ))
                         if prev_candles:
-                            seed_candles = prev_candles[-seed_count:]
+                            needed = seed_count - len(seed_candles)
+                            seed_candles = prev_candles[-needed:] + seed_candles
                             logger.info(
-                                "Seed from %s: %d candles | %s combined total: %d",
+                                "Seed from %s: accumulated %d candles for %s",
                                 prev_day, len(seed_candles), self._instrument_name,
-                                len(seed_candles) + len(today_candles),
                             )
-                            break
-                        else:
-                            prev_day -= timedelta(days=1)
+                            if len(seed_candles) >= seed_count:
+                                break
                     except Exception as e:
                         logger.warning("Seed fetch failed for %s %s: %s — trying prev day", self._instrument_name, prev_day, e)
-                        prev_day -= timedelta(days=1)
+                    prev_day -= timedelta(days=1)
 
                 all_candles = seed_candles + today_candles
 
@@ -242,8 +247,16 @@ class TradingEngine:
 
             with self._get_lock():
                 raw = self._get_raw_state()
-                raw.candles = all_candles
-                raw.last_candle_time = all_candles[-1].timestamp
+                # Merge instead of overwrite: a live tick may have already added candles (C6).
+                if raw.candles:
+                    existing_times = {c.timestamp for c in raw.candles}
+                    new_only = [c for c in all_candles if c.timestamp not in existing_times]
+                    combined = raw.candles + new_only
+                    combined.sort(key=lambda c: c.timestamp)
+                    raw.candles = combined
+                else:
+                    raw.candles = all_candles
+                raw.last_candle_time = raw.candles[-1].timestamp
 
             logger.info(
                 "%s session candles ready: %d | %s → %s | indicators_ready=%s",
@@ -266,17 +279,29 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     def start(self, kite: KiteConnect) -> dict:
-        state = self._get_state()
-        if state.engine_running:
-            raise RuntimeError(f"{self._instrument_name} engine is already running")
+        # _start_lock serialises concurrent calls; the inner lock check+set is atomic.
+        with self._start_lock:
+            with self._get_lock():
+                raw = self._get_raw_state()
+                if raw.engine_running:
+                    raise RuntimeError(f"{self._instrument_name} engine is already running")
+                raw.engine_running = True   # claim before any I/O so re-entrant call is rejected
 
+        try:
+            return self._start_impl(kite)
+        except Exception:
+            self._update_state(engine_running=False)
+            raise
+
+    def _start_impl(self, kite: KiteConnect) -> dict:
         mode = TRADING_MODE.upper()
         if mode not in ("PAPER", "LIVE"):
             mode = "PAPER"
 
         self._kite = kite
+        self._last_position_tick_at = None
         self._state_mgr.reset_daily_state(mode=mode)
-        self._update_state(engine_running=True)
+        # engine_running was set to True in start() before calling here; keep it.
 
         logger.info("Starting %s engine in %s mode", self._instrument_name, mode)
 
@@ -363,14 +388,21 @@ class TradingEngine:
         }
 
     def stop(self, kite: KiteConnect) -> None:
-        state = self._get_state()
-        if state.position is not None:
-            logger.info("%s stopping — closing open position first", self._instrument_name)
-            self._execute_exit(reason="MANUAL_STOP", forced=True)
-
-        self._market_data.unregister_instrument(self._instrument_name)
-        self._update_state(engine_running=False)
-        logger.info("%s trading engine stopped", self._instrument_name)
+        try:
+            state = self._get_state()
+            if state.position is not None:
+                logger.info("%s stopping — closing open position first", self._instrument_name)
+                self._execute_exit(reason="MANUAL_STOP", forced=True)
+            self._market_data.unregister_instrument(self._instrument_name)
+        except Exception as e:
+            logger.error(
+                "%s stop encountered error: %s — engine_running will be cleared anyway",
+                self._instrument_name, e,
+            )
+            self._update_state(error_message=f"Stop error: {e}")
+        finally:
+            self._update_state(engine_running=False)
+            logger.info("%s trading engine stopped", self._instrument_name)
 
     def get_status(self) -> dict:
         state = self._get_state()
@@ -489,6 +521,12 @@ class TradingEngine:
         if new_atm == current_atm:
             return
 
+        # Hysteresis: only swap when spot has moved ≥40% of a strike interval past
+        # the current ATM to avoid thrashing near strike boundaries.
+        distance = abs(state.nifty_spot - current_atm)
+        if distance < strike_interval * 0.40:
+            return
+
         logger.info(
             "%s ATM shift | %d → %d | spot=%.1f",
             self._instrument_name, current_atm, new_atm, state.nifty_spot,
@@ -508,6 +546,12 @@ class TradingEngine:
         ]
         new_tokens = [new_ce["instrument_token"], new_pe["instrument_token"]]
 
+        # Reset cached LTPs so stale prices from the old strike don't pollute SL checks
+        # until the first tick on the new strike arrives (C10).
+        with self._get_lock():
+            raw = self._get_raw_state()
+            raw.ce_ltp = 0.0
+            raw.pe_ltp = 0.0
         self._ce_instrument = new_ce
         self._pe_instrument = new_pe
         self._market_data.swap_option_subscriptions(self._instrument_name, old_tokens, new_tokens)
@@ -533,10 +577,15 @@ class TradingEngine:
                 raw.pe_ltp = ltp
             if raw.position and raw.position.instrument_token == token:
                 raw.position.current_price = ltp
+                # Track last tick time for the open position (H5 — stale-price guard)
+                self._last_position_tick_at = time_module.monotonic()
 
     def _on_candle_ready(self, candle: Candle) -> None:
         with self._get_lock():
             raw = self._get_raw_state()
+            # Dedupe: skip if this slot was already added by a backfill that raced this tick (C8).
+            if raw.candles and raw.candles[-1].timestamp == candle.timestamp:
+                return
             raw.candles.append(candle)
             raw.last_candle_time = candle.timestamp
 
@@ -650,7 +699,7 @@ class TradingEngine:
                     self._instrument_name, instrument["tradingsymbol"], avg_price, order_id,
                 )
 
-            option_type = signal.value[-2:]
+            option_type = "CE" if signal == Signal.BUY_CE else "PE"
             sl_price    = round(avg_price * (1 - INITIAL_SL_PCT / 100), 2)
             sl_pct      = INITIAL_SL_PCT
 
@@ -691,6 +740,8 @@ class TradingEngine:
                 self._instrument_name, instrument["tradingsymbol"],
                 avg_price, sl_price, sl_pct, reason,
             )
+            # Start tracking ticks for the new position (H5)
+            self._last_position_tick_at = time_module.monotonic()
             self._update_state(position=position)
 
         except TokenException:
@@ -701,8 +752,39 @@ class TradingEngine:
 
         except Exception as e:
             logger.error("%s entry failed: %s", self._instrument_name, e)
-            with self._get_lock():
-                self._get_raw_state().trades_today -= 1
+            if mode == "PAPER":
+                # Paper mode: order never leaves the system, safe to roll back.
+                with self._get_lock():
+                    self._get_raw_state().trades_today -= 1
+            else:
+                # LIVE mode: the order may have been accepted before the exception.
+                # Attempt reconciliation; only roll back if no open order found (C5).
+                rolled_back = False
+                try:
+                    kite_chk = self._kite or require_authenticated_client()
+                    orders = kite_chk.orders() or []
+                    sym = instrument["tradingsymbol"]
+                    live = [
+                        o for o in orders
+                        if o.get("tradingsymbol") == sym
+                        and o.get("transaction_type") == "BUY"
+                        and o.get("status") in ("OPEN", "COMPLETE", "TRIGGER PENDING")
+                    ]
+                    if not live:
+                        with self._get_lock():
+                            self._get_raw_state().trades_today -= 1
+                        rolled_back = True
+                except Exception as rec_err:
+                    logger.error(
+                        "%s order reconciliation failed: %s — keeping trades_today as-is to be safe",
+                        self._instrument_name, rec_err,
+                    )
+                if not rolled_back:
+                    logger.error(
+                        "%s entry exception with possible live order — trades_today NOT rolled back. "
+                        "Check Zerodha immediately!",
+                        self._instrument_name,
+                    )
             self._update_state(error_message=str(e))
 
     # ------------------------------------------------------------------
@@ -710,16 +792,20 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     def _execute_exit(self, reason: str, forced: bool = False) -> None:
-        state    = self._get_state()
-        position = state.position
-        if position is None:
-            return
+        # Atomically claim the position before any broker I/O to prevent duplicate exits (C2).
+        position = None
+        with self._get_lock():
+            raw = self._get_raw_state()
+            if raw.position is None:
+                return
+            position = copy.copy(raw.position)
+            raw.position = None  # cleared here — concurrent callers now see None and return early
 
         exit_price = position.current_price
         if exit_price <= 0:
             exit_price = position.entry_price
 
-        mode = state.trading_mode
+        mode = self._get_state().trading_mode
 
         try:
             if mode == "PAPER":
@@ -733,8 +819,13 @@ class TradingEngine:
                 if not forced or verify_position_exists(kite, position.option_symbol):
                     place_exit_order(kite, position, reason)
 
+            # Mark that the first trade was a hard SL hit so second entry is blocked (H7).
+            if reason == "STOPLOSS_HIT":
+                self._update_state(first_trade_was_sl=True)
+
+            nifty_spot_exit = self._get_state().nifty_spot
             log_trade(
-                trade_number=state.trades_today,
+                trade_number=self._get_state().trades_today,
                 option_symbol=position.option_symbol,
                 option_type=position.option_type,
                 strike=position.strike,
@@ -749,7 +840,7 @@ class TradingEngine:
                 trailing_sl_used=position.trail_active,
                 breakeven_set=position.breakeven_set,
                 nifty_spot_entry=position.nifty_spot_entry,
-                nifty_spot_exit=state.nifty_spot,
+                nifty_spot_exit=nifty_spot_exit,
                 vwap_entry=position.vwap_entry,
                 ema20_entry=position.ema20_entry,
                 rsi14_entry=position.rsi14_entry,
@@ -760,11 +851,11 @@ class TradingEngine:
 
             pnl = calculate_pnl(position.entry_price, exit_price, position.qty)
             self._update_state(
-                position=None,
                 exit_reason=reason,
                 exit_price=exit_price,
                 pnl=pnl,
             )
+            self._last_position_tick_at = None
             logger.info(
                 "%s EXIT COMPLETE | reason=%s | PnL: ₹%.2f (%.1f%%)",
                 self._instrument_name, reason, pnl["pnl_rupees"], pnl["pnl_pct"],
@@ -777,12 +868,14 @@ class TradingEngine:
                 error_message="Token expired during exit! Check Zerodha app immediately.",
             )
         except Exception as e:
-            logger.error("%s exit failed: %s — will retry", self._instrument_name, e)
+            logger.error("%s exit failed: %s", self._instrument_name, e)
             self._update_state(error_message=f"Exit failed: {e}")
 
     # ------------------------------------------------------------------
     # Monitoring loop
     # ------------------------------------------------------------------
+
+    _POSITION_TICK_STALL_S = 30  # seconds without a position tick before forcing REST LTP
 
     def _monitoring_loop(self) -> None:
         logger.info("%s monitoring loop started", self._instrument_name)
@@ -796,6 +889,19 @@ class TradingEngine:
             if state.position is not None:
                 self._check_position_exits(state)
 
+                # Force REST LTP when WebSocket has gone silent during an open position (H5).
+                stale = (
+                    self._last_position_tick_at is None
+                    or time_module.monotonic() - self._last_position_tick_at > self._POSITION_TICK_STALL_S
+                )
+                if stale and self._ce_instrument and self._pe_instrument:
+                    logger.warning(
+                        "%s position tick stall (>%ds) — forcing REST LTP",
+                        self._instrument_name, self._POSITION_TICK_STALL_S,
+                    )
+                    self._fetch_option_ltp_rest()
+                    self._last_position_tick_at = time_module.monotonic()  # suppress log spam
+
             _ltp_fallback_tick += 1
             if _ltp_fallback_tick >= 30:
                 _ltp_fallback_tick = 0
@@ -808,8 +914,8 @@ class TradingEngine:
 
     def _fetch_option_ltp_rest(self) -> None:
         try:
-            ce_sym  = f"NFO:{self._ce_instrument['tradingsymbol']}"
-            pe_sym  = f"NFO:{self._pe_instrument['tradingsymbol']}"
+            ce_sym   = f"NFO:{self._ce_instrument['tradingsymbol']}"
+            pe_sym   = f"NFO:{self._pe_instrument['tradingsymbol']}"
             ltp_data = self._kite.ltp([ce_sym, pe_sym])
             ce_ltp   = ltp_data.get(ce_sym, {}).get("last_price", 0)
             pe_ltp   = ltp_data.get(pe_sym, {}).get("last_price", 0)
@@ -819,6 +925,12 @@ class TradingEngine:
                     raw.ce_ltp = ce_ltp
                 if pe_ltp > 0:
                     raw.pe_ltp = pe_ltp
+                # Also update position.current_price so SL checks see the fresh price (H5).
+                if raw.position:
+                    if raw.position.option_type == "CE" and ce_ltp > 0:
+                        raw.position.current_price = ce_ltp
+                    elif raw.position.option_type == "PE" and pe_ltp > 0:
+                        raw.position.current_price = pe_ltp
             logger.debug("%s REST LTP fallback | CE=%.2f PE=%.2f", self._instrument_name, ce_ltp, pe_ltp)
         except Exception as e:
             logger.debug("%s REST LTP fallback failed (non-fatal): %s", self._instrument_name, e)

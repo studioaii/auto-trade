@@ -64,9 +64,8 @@ class TradingState:
     exit_price: Optional[float] = None
     pnl: Optional[dict] = None
     error_message: Optional[str] = None
-    # VWAP accumulator (reset daily)
-    vwap_cum_tp_vol: float = 0.0        # cumulative (typical_price * volume)
-    vwap_cum_vol: float = 0.0           # cumulative volume
+    # Sticky SL-block flag: survives engine stop/restart within the same process lifetime
+    first_trade_was_sl: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -88,10 +87,11 @@ class InstrumentStateManager:
     def get_state(self) -> TradingState:
         with self._lock:
             snap = copy.copy(self._state)
-            # Detach the candle list so readers can iterate without racing
-            # against WebSocket-thread appends (Candle objects are immutable
-            # post-close, so a shallow list copy is sufficient).
             snap.candles = list(self._state.candles)
+            # Deep-copy position so readers get an isolated snapshot;
+            # prevents torn reads across trailing_sl_price / highest_price_seen / trail_active.
+            if self._state.position is not None:
+                snap.position = copy.copy(self._state.position)
             return snap
 
     def update_state(self, **kwargs) -> None:
@@ -100,7 +100,9 @@ class InstrumentStateManager:
                 if hasattr(self._state, key):
                     setattr(self._state, key, value)
                 else:
-                    logger.warning("TradingState has no field: %s (instrument=%s)", key, self._instrument_name)
+                    raise AttributeError(
+                        f"TradingState has no field '{key}' (instrument={self._instrument_name})"
+                    )
 
     def get_lock(self) -> threading.Lock:
         return self._lock
@@ -126,8 +128,7 @@ class InstrumentStateManager:
             self._state.exit_price = None
             self._state.pnl = None
             self._state.error_message = None
-            self._state.vwap_cum_tp_vol = 0.0
-            self._state.vwap_cum_vol = 0.0
+            self._state.first_trade_was_sl = False
         logger.info("Daily state reset | instrument=%s mode=%s", self._instrument_name, mode)
 
 
@@ -139,21 +140,23 @@ _lock = threading.Lock()
 
 
 def get_state() -> TradingState:
-    """Return a shallow copy for safe reading (no lock held during use)."""
+    """Return a snapshot copy for safe reading (no lock held during use)."""
     with _lock:
         snap = copy.copy(_state)
         snap.candles = list(_state.candles)
+        if _state.position is not None:
+            snap.position = copy.copy(_state.position)
         return snap
 
 
 def update_state(**kwargs) -> None:
-    """Thread-safe field update."""
+    """Thread-safe field update. Raises AttributeError on unknown keys."""
     with _lock:
         for key, value in kwargs.items():
             if hasattr(_state, key):
                 setattr(_state, key, value)
             else:
-                logger.warning("TradingState has no field: %s", key)
+                raise AttributeError(f"TradingState has no field '{key}'")
 
 
 def get_lock() -> threading.Lock:
@@ -183,6 +186,5 @@ def reset_daily_state(mode: str = "PAPER") -> None:
         _state.exit_price = None
         _state.pnl = None
         _state.error_message = None
-        _state.vwap_cum_tp_vol = 0.0
-        _state.vwap_cum_vol = 0.0
+        _state.first_trade_was_sl = False
     logger.info("Daily trading state reset | mode=%s", mode)

@@ -31,9 +31,19 @@ def _load_token_from_file() -> None:
 
 
 def _save_token_to_file() -> None:
+    """Write token file with 0600 permissions via atomic rename to prevent partial reads."""
     try:
-        with open(_TOKEN_FILE, "w") as f:
-            json.dump(_token_store, f)
+        import stat, tempfile
+        target = os.path.abspath(_TOKEN_FILE)
+        dir_path = os.path.dirname(target)
+        os.makedirs(dir_path, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path)
+        try:
+            os.write(fd, json.dumps(_token_store).encode())
+        finally:
+            os.close(fd)
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)  # 0600 — owner read/write only
+        os.replace(tmp_path, target)
     except Exception:
         logger.warning("Could not persist token", exc_info=True)
 

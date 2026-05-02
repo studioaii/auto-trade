@@ -4,14 +4,50 @@ Writes one row per 5-min candle to candle_logs/candles_YYYY-MM-DD.csv.
 Captures OHLCV + every indicator the strategy uses, so you can replay
 exactly what the engine saw at each candle and analyse why it entered,
 skipped, or did nothing.
+
+Writes are dispatched to a background thread via a queue (H8) so the
+WebSocket callback thread is never blocked on disk I/O.
 """
 import csv
 import os
+import queue
+import threading
 import logging
 from typing import Optional
 from services.trading_state import Candle, TradingState
 
 logger = logging.getLogger(__name__)
+
+# Background writer queue — single daemon thread drains it.
+_write_queue: queue.Queue = queue.Queue()
+_writer_started = False
+_writer_lock = threading.Lock()
+
+
+def _ensure_writer_running() -> None:
+    global _writer_started
+    with _writer_lock:
+        if _writer_started:
+            return
+        _writer_started = True
+
+    def _worker():
+        while True:
+            task = _write_queue.get()
+            if task is None:
+                break
+            path, write_hdr, row = task
+            try:
+                with open(path, "a", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=HEADERS)
+                    if write_hdr:
+                        w.writeheader()
+                    w.writerow(row)
+            except Exception as e:
+                logger.warning("Candle log write failed: %s", e)
+
+    t = threading.Thread(target=_worker, name="CandleLogWriter", daemon=True)
+    t.start()
 
 LOG_DIR = "candle_logs"
 
@@ -205,11 +241,8 @@ def log_candle(
             "position_current_price": round(pos.current_price, 2) if pos else "",
         }
 
-        with open(path, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=HEADERS)
-            if write_hdr:
-                w.writeheader()
-            w.writerow(row)
+        _ensure_writer_running()
+        _write_queue.put((path, write_hdr, row))
 
     except Exception as e:
         logger.warning("Candle log write failed (non-fatal): %s", e)

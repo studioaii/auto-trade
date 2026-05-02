@@ -411,14 +411,17 @@ function downloadCandleLog() {
 }
 
 // ─── lifecycle ───────────────────────────────────────────────────────────────
+let tradesTimer = null
+
 onMounted(() => {
   refreshAll()
   loadTrades()
   refreshTimer = setInterval(refreshAll, 2000)
-  setInterval(loadTrades, 10000)
+  tradesTimer  = setInterval(loadTrades, 10000)
 })
 
 onUnmounted(() => {
   clearInterval(refreshTimer)
+  clearInterval(tradesTimer)
 })
 </script>

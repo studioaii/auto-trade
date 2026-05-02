@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import os
+import time as _time
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from kiteconnect.exceptions import TokenException, NetworkException
@@ -12,6 +13,10 @@ from services.candle_logger import list_log_files, LOG_DIR
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auto-trading", tags=["auto-trading"])
+
+# 1-second cache for status responses — prevents dashboard polling from exceeding Kite rate limits (H13).
+_STATUS_CACHE: dict[str, tuple[float, dict]] = {}
+_STATUS_TTL = 1.0
 
 
 def _get_kite():
@@ -30,7 +35,7 @@ async def _start_engine(instrument: str):
 
     kite = _get_kite()
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, engine.start, kite)
     except TokenException:
         raise HTTPException(status_code=401, detail="Token expired. Re-authenticate via /login.")
@@ -66,7 +71,7 @@ async def _stop_engine(instrument: str):
 
     kite = _get_kite()
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, engine.stop, kite)
     except Exception as e:
         logger.error("%s engine stop error: %s", instrument, e)
@@ -100,7 +105,7 @@ async def start_all():
             results[instrument] = {"status": "already_running"}
             continue
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             info = await loop.run_in_executor(None, engine.start, kite)
             results[instrument] = {
                 "status": "started",
@@ -134,7 +139,7 @@ async def stop_all():
             results[instrument] = {"status": "already_stopped"}
             continue
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, engine.stop, kite)
             final = engine.get_status()
             results[instrument] = {
@@ -165,7 +170,13 @@ async def stop_nifty():
 
 @router.get("/status")
 async def get_nifty_status():
-    return get_nifty_engine().get_status()
+    now = _time.monotonic()
+    cached = _STATUS_CACHE.get("NIFTY")
+    if cached and now - cached[0] < _STATUS_TTL:
+        return cached[1]
+    result = get_nifty_engine().get_status()
+    _STATUS_CACHE["NIFTY"] = (now, result)
+    return result
 
 
 @router.get("/paper-log")
@@ -215,7 +226,13 @@ async def stop_banknifty():
 
 @router.get("/banknifty/status")
 async def get_banknifty_status():
-    return get_banknifty_engine().get_status()
+    now = _time.monotonic()
+    cached = _STATUS_CACHE.get("BANKNIFTY")
+    if cached and now - cached[0] < _STATUS_TTL:
+        return cached[1]
+    result = get_banknifty_engine().get_status()
+    _STATUS_CACHE["BANKNIFTY"] = (now, result)
+    return result
 
 
 @router.get("/banknifty/paper-log")

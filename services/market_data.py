@@ -623,9 +623,12 @@ class MarketDataService:
 
             with sub.get_lock_fn():
                 raw = sub.get_raw_state_fn()
-                raw.candles.extend(new_candles)
+                existing_times = {c.timestamp for c in raw.candles}
+                to_add = [c for c in new_candles if c.timestamp not in existing_times]
+                raw.candles.extend(to_add)
                 raw.candles.sort(key=lambda c: c.timestamp)
-                raw.last_candle_time = raw.candles[-1].timestamp
+                if raw.candles:
+                    raw.last_candle_time = raw.candles[-1].timestamp
 
             logger.info(
                 "Backfill complete | %s | %d candles | %s → %s",

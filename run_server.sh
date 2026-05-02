@@ -21,11 +21,16 @@ cleanup() {
     kill $PING_PID 2>/dev/null
     exit 0
 }
-trap cleanup SIGINT SIGTERM
+trap cleanup SIGINT SIGTERM EXIT
 
 echo "Server starting (sleep prevention active)..."
 cd "$(dirname "$0")"
 LOG_FILE="server.log"
 echo "--- Server started at $(date) ---" >> "$LOG_FILE"
-python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload 2>&1 | tee -a "$LOG_FILE"
-cleanup
+# --reload-dir limits watch to source dirs only — prevents uvicorn from restarting
+# when CSV/log files in the project root are written (M12)
+python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 \
+    --reload \
+    --reload-dir services \
+    --reload-dir routers \
+    2>&1 | tee -a "$LOG_FILE"

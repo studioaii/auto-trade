@@ -6,7 +6,6 @@ export default defineConfig({
   server: {
     proxy: {
       '/auto-trading': 'http://127.0.0.1:8000',
-      '/backtest':     'http://127.0.0.1:8000',
       '/login':        'http://127.0.0.1:8000',
       '/logout':       'http://127.0.0.1:8000',
       '/callback':     'http://127.0.0.1:8000',

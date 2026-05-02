@@ -8,7 +8,7 @@ from services.strategy import Signal
 
 logger = logging.getLogger(__name__)
 
-MAX_POLL_ATTEMPTS         = 15   # seconds to wait for order completion
+MAX_POLL_ATTEMPTS         = 30   # seconds to wait for order completion
 _HISTORY_NET_RETRY_LIMIT  = 3    # consecutive transient retries per poll cycle
 
 

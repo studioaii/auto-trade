@@ -47,8 +47,9 @@ def can_enter_trade(state: TradingState) -> tuple[bool, str]:
     if state.trades_today >= MAX_TRADES_PER_DAY:
         return False, f"Max trades for today reached ({MAX_TRADES_PER_DAY})"
 
-    # Block second entry if first trade was stopped out at hard SL.
-    if state.trades_today >= 1 and state.exit_reason == "STOPLOSS_HIT":
+    # Block second entry if first trade hit hard SL.
+    # Uses sticky flag that survives engine stop/restart (H7).
+    if state.trades_today >= 1 and state.first_trade_was_sl:
         return False, "Second entry blocked — first trade hit hard SL today"
 
     t = _now_ist()

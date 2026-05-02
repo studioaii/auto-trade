@@ -177,15 +177,18 @@ class DailyScheduler:
         from services.market_data import get_market_data_service
 
         mds = get_market_data_service()
-        if not mds._running:
-            return  # no engine started, nothing to check
+        # Read state under lock to avoid racing force_reconnect / stop (H1).
+        with mds._lock:
+            running   = mds._running
+            connected = mds._connected
 
-        if mds._connected:
+        if not running:
+            return  # no engine started, nothing to check
+        if connected:
             return  # healthy
 
         logger.warning(
-            "DailyScheduler: WebSocket appears disconnected (running=%s connected=%s) — forcing reconnect",
-            mds._running, mds._connected,
+            "DailyScheduler: WebSocket appears disconnected — forcing reconnect",
         )
         try:
             mds.force_reconnect()

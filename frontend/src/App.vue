@@ -26,10 +26,6 @@
           <span class="nav-icon">🏦</span>
           <span class="nav-label">BANK NIFTY</span>
         </RouterLink>
-        <RouterLink to="/backtest" class="nav-item">
-          <span class="nav-icon">🔬</span>
-          <span class="nav-label">Backtest</span>
-        </RouterLink>
         <RouterLink to="/portfolio" class="nav-item">
           <span class="nav-icon">💼</span>
           <span class="nav-label">Portfolio</span>
@@ -109,15 +105,18 @@ async function checkAuth() {
       const d = await r.json()
       isAuthenticated.value = true
       userName.value = d.user_name || d.user_id || ''
-    } else {
+    } else if (r.status === 401) {
+      // Not authenticated — redirect to login once
       isAuthenticated.value = false
       window.location.href = '/login'
       return
+    } else {
+      // Server/Kite error (5xx) — show disconnected state, don't redirect (avoids redirect loop)
+      isAuthenticated.value = false
     }
   } catch {
+    // Network error — show disconnected state, don't redirect
     isAuthenticated.value = false
-    window.location.href = '/login'
-    return
   }
   authChecking.value = false
 }
