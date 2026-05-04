@@ -678,7 +678,21 @@ class TradingEngine:
             if mode == "PAPER":
                 ltp = state.ce_ltp if signal == Signal.BUY_CE else state.pe_ltp
                 if ltp <= 0:
-                    logger.warning("%s option LTP not available for paper entry", self._instrument_name)
+                    # ATM just shifted — WebSocket ticks haven't arrived yet; fall back to REST.
+                    try:
+                        sym = f"NFO:{instrument['tradingsymbol']}"
+                        ltp_data = self._kite.ltp([sym])
+                        ltp = ltp_data.get(sym, {}).get("last_price", 0)
+                        logger.info(
+                            "%s REST LTP fallback at entry | %s | ltp=%.2f",
+                            self._instrument_name, instrument["tradingsymbol"], ltp,
+                        )
+                    except Exception as ltp_err:
+                        logger.warning(
+                            "%s REST LTP fallback failed: %s", self._instrument_name, ltp_err,
+                        )
+                if ltp <= 0:
+                    logger.warning("%s option LTP not available for paper entry (REST also failed)", self._instrument_name)
                     with self._get_lock():
                         self._get_raw_state().trades_today -= 1
                     return
