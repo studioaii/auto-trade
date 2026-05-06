@@ -2,7 +2,6 @@
 DailyScheduler — runs as a background daemon thread to:
   • Auto-start both engines at 09:15 IST (force-restart if stuck)
   • Auto-stop  both engines at 15:35 IST
-  • Re-check WebSocket health every 10 minutes and force-reconnect if down
 """
 import logging
 import threading
@@ -17,7 +16,6 @@ IST = ZoneInfo("Asia/Kolkata")
 # (30-second polling means we'll catch it within 30 s of the target minute)
 _START_HOUR, _START_MIN = 9, 15     # auto-start window: 09:15 – 09:18
 _STOP_HOUR,  _STOP_MIN  = 15, 35    # auto-stop  window: 15:35 – 15:38
-_WS_CHECK_INTERVAL_S    = 60        # 1 minute (backup to ConnectionMonitor)
 _POLL_INTERVAL_S        = 30        # scheduler loop tick
 
 
@@ -25,7 +23,6 @@ class DailyScheduler:
     def __init__(self):
         self._today_started:  date | None = None
         self._today_stopped:  date | None = None
-        self._last_ws_check:  float       = 0.0
         self._thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
@@ -76,11 +73,6 @@ class DailyScheduler:
             logger.info("DailyScheduler: 15:35 window — auto-stopping engines")
             self._stop_engines()
             self._today_stopped = today
-
-        # ── WebSocket health check every 10 minutes ─────────────────────
-        if time.monotonic() - self._last_ws_check >= _WS_CHECK_INTERVAL_S:
-            self._check_websocket()
-            self._last_ws_check = time.monotonic()
 
     # ------------------------------------------------------------------
     # Engine auto-start
@@ -168,32 +160,6 @@ class DailyScheduler:
 
             except Exception as exc:
                 logger.error("DailyScheduler: failed to stop %s — %s", name, exc)
-
-    # ------------------------------------------------------------------
-    # WebSocket health check
-    # ------------------------------------------------------------------
-
-    def _check_websocket(self) -> None:
-        from services.market_data import get_market_data_service
-
-        mds = get_market_data_service()
-        # Read state under lock to avoid racing force_reconnect / stop (H1).
-        with mds._lock:
-            running   = mds._running
-            connected = mds._connected
-
-        if not running:
-            return  # no engine started, nothing to check
-        if connected:
-            return  # healthy
-
-        logger.warning(
-            "DailyScheduler: WebSocket appears disconnected — forcing reconnect",
-        )
-        try:
-            mds.force_reconnect()
-        except Exception as exc:
-            logger.error("DailyScheduler: force_reconnect failed — %s", exc)
 
 
 # Module-level singleton

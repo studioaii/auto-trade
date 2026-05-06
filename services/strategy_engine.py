@@ -119,6 +119,8 @@ class TradingEngine:
         self._start_lock = threading.Lock()
         # Monotonic timestamp of last tick for the open position (H5)
         self._last_position_tick_at: Optional[float] = None
+        self._last_known_ce_ltp: float = 0.0
+        self._last_known_pe_ltp: float = 0.0
 
     # ------------------------------------------------------------------
     # Convenience accessors that delegate to the state manager
@@ -270,6 +272,18 @@ class TradingEngine:
                 ind = get_latest_indicators(all_candles)
                 if ind.get("enough_data"):
                     self._update_state(market_state=ind["market_state"])
+
+            if today_candles:
+                atm_strike = int(self._ce_instrument["strike"]) if self._ce_instrument else None
+                seed_len = len(all_candles) - len(today_candles)
+                replay_state = self._get_state()
+                for idx, candle in enumerate(today_candles):
+                    if candle.timestamp.date() != today:
+                        continue
+                    subset = all_candles[:seed_len + idx + 1]
+                    ind = get_latest_indicators(subset)
+                    replay_state.candles = subset
+                    log_candle(candle, ind, "NO_SIGNAL", replay_state, atm_strike, instrument=self._instrument_name)
 
         except Exception as e:
             logger.warning("%s session candle preload failed (non-fatal): %s", self._instrument_name, e)
@@ -573,8 +587,10 @@ class TradingEngine:
             raw = self._get_raw_state()
             if self._ce_instrument and token == self._ce_instrument["instrument_token"]:
                 raw.ce_ltp = ltp
+                self._last_known_ce_ltp = ltp
             elif self._pe_instrument and token == self._pe_instrument["instrument_token"]:
                 raw.pe_ltp = ltp
+                self._last_known_pe_ltp = ltp
             if raw.position and raw.position.instrument_token == token:
                 raw.position.current_price = ltp
                 # Track last tick time for the open position (H5 — stale-price guard)
@@ -629,6 +645,10 @@ class TradingEngine:
             self._update_state(last_signal=signal.value)
 
         atm_strike = int(self._ce_instrument["strike"]) if self._ce_instrument else None
+        if state.ce_ltp == 0 and self._last_known_ce_ltp > 0:
+            state.ce_ltp = self._last_known_ce_ltp
+        if state.pe_ltp == 0 and self._last_known_pe_ltp > 0:
+            state.pe_ltp = self._last_known_pe_ltp
         log_candle(candle, indicators, signal.value, state, atm_strike, instrument=self._instrument_name)
 
         if state.position is not None:
