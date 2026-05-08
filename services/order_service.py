@@ -90,12 +90,13 @@ def get_average_price(kite: KiteConnect, order_id: str) -> float:
 
 def place_exit_order(kite: KiteConnect, position: PositionInfo, reason: str) -> str:
     """
-    Place a MARKET SELL order to close the open position.
+    Place a MARKET SELL order to close the FULL open position.
     Returns exit order_id.
     """
+    qty = position.qty_remaining if position.qty_remaining > 0 else position.qty
     logger.info(
         "Placing exit order | %s | qty=%d | reason=%s",
-        position.option_symbol, position.qty, reason
+        position.option_symbol, qty, reason
     )
 
     order_id = kite.place_order(
@@ -103,12 +104,41 @@ def place_exit_order(kite: KiteConnect, position: PositionInfo, reason: str) -> 
         exchange="NFO",
         tradingsymbol=position.option_symbol,
         transaction_type=kite.TRANSACTION_TYPE_SELL,
-        quantity=position.qty,
+        quantity=qty,
         product=kite.PRODUCT_MIS,
         order_type=kite.ORDER_TYPE_MARKET,
     )
 
     logger.info("Exit order placed | order_id=%s | reason=%s", order_id, reason)
+    return str(order_id)
+
+
+def place_partial_exit_order(
+    kite: KiteConnect, position: PositionInfo, qty: int, reason: str,
+) -> str:
+    """
+    Place a MARKET SELL order for an explicit partial quantity.
+    Caller is responsible for tracking remaining qty on the position.
+    """
+    if qty <= 0:
+        raise ValueError(f"place_partial_exit_order: qty must be > 0 (got {qty})")
+    logger.info(
+        "Placing partial exit order | %s | qty=%d | reason=%s",
+        position.option_symbol, qty, reason,
+    )
+
+    order_id = kite.place_order(
+        variety=kite.VARIETY_REGULAR,
+        exchange="NFO",
+        tradingsymbol=position.option_symbol,
+        transaction_type=kite.TRANSACTION_TYPE_SELL,
+        quantity=qty,
+        product=kite.PRODUCT_MIS,
+        order_type=kite.ORDER_TYPE_MARKET,
+    )
+
+    logger.info("Partial exit order placed | order_id=%s | qty=%d reason=%s",
+                order_id, qty, reason)
     return str(order_id)
 
 

@@ -7,7 +7,7 @@ import copy
 import time as time_module
 import logging
 import threading
-from datetime import datetime, timedelta, date as date_type
+from datetime import datetime, time as time_type, timedelta, date as date_type
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -22,15 +22,17 @@ from services.trading_state import (
 )
 from services.instruments import (
     fetch_instruments, get_current_expiry_for_instrument, get_atm_strike,
-    find_option_instrument, find_futures,
+    get_strike_with_offset, find_option_instrument, find_futures,
 )
 from services.indicators import get_latest_indicators, MIN_CANDLES, candle_body_pct
 from services.strategy import (
     Signal, generate_signal, detect_opposite_signal,
     is_market_open_and_ready,
 )
+from services.day_bias import classify_day_bias
 from services.order_service import (
-    place_entry_order, get_average_price, place_exit_order, verify_position_exists,
+    place_entry_order, get_average_price, place_exit_order,
+    place_partial_exit_order, verify_position_exists,
 )
 from services.risk_manager import (
     can_enter_trade, check_exit_conditions, calculate_pnl,
@@ -121,6 +123,9 @@ class TradingEngine:
         self._last_position_tick_at: Optional[float] = None
         self._last_known_ce_ltp: float = 0.0
         self._last_known_pe_ltp: float = 0.0
+        # v3: previous trading day's last close (captured from seed candles).
+        # Used by day_bias classifier; 0.0 disables the classifier.
+        self._prev_close: float = 0.0
 
     # ------------------------------------------------------------------
     # Convenience accessors that delegate to the state manager
@@ -243,6 +248,11 @@ class TradingEngine:
 
                 all_candles = seed_candles + today_candles
 
+            # v3: capture previous-day last close for day-bias classifier.
+            # Use the last seed candle (yesterday's last 5-min close on the underlying).
+            if seed_candles:
+                self._prev_close = seed_candles[-1].close
+
             if not all_candles:
                 logger.info("No historical candles available for %s", self._instrument_name)
                 return
@@ -328,11 +338,14 @@ class TradingEngine:
         ltp_data = kite.ltp(ltp_symbol)
         spot = ltp_data[ltp_symbol]["last_price"]
         strike_interval = self._cfg["strike_interval"]
-        atm = get_atm_strike(spot, strike_interval)
+        ce_offset = int(self._cfg.get("strike_offset_ce", 0))
+        pe_offset = int(self._cfg.get("strike_offset_pe", 0))
+        ce_strike = get_strike_with_offset(spot, strike_interval, ce_offset)
+        pe_strike = get_strike_with_offset(spot, strike_interval, pe_offset)
         self._update_state(nifty_spot=spot)
 
-        self._ce_instrument = find_option_instrument(self._instruments, expiry, atm, "CE")
-        self._pe_instrument = find_option_instrument(self._instruments, expiry, atm, "PE")
+        self._ce_instrument = find_option_instrument(self._instruments, expiry, ce_strike, "CE")
+        self._pe_instrument = find_option_instrument(self._instruments, expiry, pe_strike, "PE")
 
         # Find futures for candle building
         try:
@@ -364,6 +377,16 @@ class TradingEngine:
 
         # Preload candles before WebSocket starts
         self._load_session_candles()
+
+        # v3: populate today's event-day flag so it appears in /status from boot.
+        # Read but not yet consulted by entry gate (Phase 3 wires it in).
+        try:
+            from services.events import is_event_day
+            today_ist = datetime.now(IST).date()
+            is_event, event_type = is_event_day(today_ist, self._instrument_name)
+            self._update_state(event_today=event_type if is_event else "")
+        except Exception:
+            logger.debug("event-day lookup failed (non-fatal)", exc_info=True)
 
         # Register with shared WebSocket service
         subscription = InstrumentSubscription(
@@ -450,6 +473,24 @@ class TradingEngine:
                 "trailing_sl":   round(p.trailing_sl_price, 2),
                 "trail_active":  p.trail_active,
                 "breakeven_set": p.breakeven_set,
+                # v3 partial-booking + risk-state surface
+                "qty_remaining":      p.qty_remaining or p.qty,
+                "peak_price":         round(p.peak_price, 2) if p.peak_price else 0.0,
+                "spot_sl_price":      round(p.spot_sl_price, 2) if p.spot_sl_price else 0.0,
+                "partial_book_1_hit": p.partial_book_1_hit,
+                "partial_book_2_hit": p.partial_book_2_hit,
+                "entry_mode":         p.entry_mode_used,
+                "partial_legs":       [
+                    {
+                        "leg_id":     leg.get("leg_id"),
+                        "qty":        leg.get("qty"),
+                        "exit_price": leg.get("exit_price"),
+                        "exit_time":  (leg["exit_time"].strftime("%H:%M:%S")
+                                       if hasattr(leg.get("exit_time"), "strftime")
+                                       else leg.get("exit_time")),
+                        "reason":     leg.get("reason"),
+                    } for leg in (p.partial_legs or [])
+                ],
             }
 
         ind_snap = {}
@@ -490,13 +531,37 @@ class TradingEngine:
             and (self._opening_rsi > opening_rsi_ob or self._opening_rsi < opening_rsi_os)
         )
 
+        # v3: surface why an entry would be blocked right now (best-effort —
+        # uses can_enter_trade with current state). When position is open or
+        # engine stopped, this just reflects that.
+        block_reason = ""
+        try:
+            allowed, reason = can_enter_trade(state, cfg=self._cfg, instrument=self._instrument_name)
+            if not allowed:
+                block_reason = reason
+        except Exception:
+            block_reason = ""
+
+        # VIX snapshot (None if module not loaded yet)
+        vix_ltp = 0.0
+        try:
+            from services import vix_state as _vs
+            vix_ltp = _vs.get_vix_ltp()
+        except Exception:
+            pass
+
+        entry_mode = self._cfg.get("entry_mode", "vwap_ema_breakout") if self._cfg else "vwap_ema_breakout"
+        max_trades = int(self._cfg.get("max_trades_per_day", MAX_TRADES_PER_DAY)) if self._cfg else MAX_TRADES_PER_DAY
+        force_exit_str = str(self._cfg.get("force_exit_time", "15:20")) if self._cfg else "15:20"
+
         return {
             "instrument":        self._instrument_name,
-            "strategy":          f"{self._instrument_name}_INTRADAY_VWAP_EMA_BREAKOUT",
+            "strategy":          entry_mode,
+            "entry_mode":        entry_mode,
             "mode":              state.trading_mode,
             "engine_running":    state.engine_running,
             "trades_today":      state.trades_today,
-            "max_trades":        MAX_TRADES_PER_DAY,
+            "max_trades":        max_trades,
             "nifty_spot":        round(state.nifty_spot, 2),
             "nifty_futures_ltp": round(state.nifty_futures_ltp, 2),
             "ce_ltp":            round(state.ce_ltp, 2),
@@ -515,6 +580,17 @@ class TradingEngine:
             "instruments":       instruments_info,
             "opening_rsi":       round(self._opening_rsi, 1) if self._opening_rsi is not None else None,
             "day_blocked":       day_blocked,
+            # ── v3 surface ────────────────────────────────────────────
+            "day_bias":          state.day_bias,
+            "day_bias_set_at":   state.day_bias_set_at.strftime("%H:%M:%S") if state.day_bias_set_at else None,
+            "event_today":       state.event_today or "",
+            "vix_ltp":           round(vix_ltp, 2) if vix_ltp else 0.0,
+            "vix_max":           float(self._cfg.get("vix_max", 999.0)) if self._cfg else 999.0,
+            "force_exit_time":   force_exit_str,
+            "failed_reversion_attempts_today": state.failed_reversion_attempts_today,
+            "session_high":      round(state.session_high, 2),
+            "session_low":       round(state.session_low, 2),
+            "block_reason":      block_reason,
         }
 
     # ------------------------------------------------------------------
@@ -529,8 +605,12 @@ class TradingEngine:
             return
 
         strike_interval = self._cfg["strike_interval"]
-        new_atm     = get_atm_strike(state.nifty_spot, strike_interval)
-        current_atm = int(self._ce_instrument["strike"])
+        ce_offset = int(self._cfg.get("strike_offset_ce", 0))
+        pe_offset = int(self._cfg.get("strike_offset_pe", 0))
+        new_atm = get_atm_strike(state.nifty_spot, strike_interval)
+        # Hysteresis is computed in ATM-space (independent of offset), so swaps
+        # don't thrash when ITM offsets are configured.
+        current_atm = int(self._ce_instrument["strike"]) - ce_offset * strike_interval
 
         if new_atm == current_atm:
             return
@@ -541,15 +621,19 @@ class TradingEngine:
         if distance < strike_interval * 0.40:
             return
 
+        new_ce_strike = new_atm + ce_offset * strike_interval
+        new_pe_strike = new_atm + pe_offset * strike_interval
+
         logger.info(
-            "%s ATM shift | %d → %d | spot=%.1f",
-            self._instrument_name, current_atm, new_atm, state.nifty_spot,
+            "%s ATM shift | atm %d → %d | ce=%d pe=%d | spot=%.1f",
+            self._instrument_name, current_atm, new_atm,
+            new_ce_strike, new_pe_strike, state.nifty_spot,
         )
 
         try:
             expiry = get_current_expiry_for_instrument(self._instruments, self._instrument_name)
-            new_ce = find_option_instrument(self._instruments, expiry, new_atm, "CE")
-            new_pe = find_option_instrument(self._instruments, expiry, new_atm, "PE")
+            new_ce = find_option_instrument(self._instruments, expiry, new_ce_strike, "CE")
+            new_pe = find_option_instrument(self._instruments, expiry, new_pe_strike, "PE")
         except ValueError as e:
             logger.warning("%s ATM reselection failed: %s", self._instrument_name, e)
             return
@@ -580,7 +664,21 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     def _on_spot_update(self, spot: float) -> None:
-        self._update_state(nifty_spot=spot)
+        with self._get_lock():
+            raw = self._get_raw_state()
+            raw.nifty_spot = spot
+            # v3: track today's session high/low (used by trend-pullback gate)
+            if raw.session_high == 0 or spot > raw.session_high:
+                raw.session_high = spot
+            if raw.session_low == 0 or spot < raw.session_low:
+                raw.session_low = spot
+            # Track per-position spot extremes for spot-SL evaluation
+            if raw.position is not None:
+                if spot > raw.position.nifty_spot_high_seen:
+                    raw.position.nifty_spot_high_seen = spot
+                if (raw.position.nifty_spot_low_seen == 0
+                        or spot < raw.position.nifty_spot_low_seen):
+                    raw.position.nifty_spot_low_seen = spot
 
     def _on_option_ltp(self, token: int, ltp: float) -> None:
         with self._get_lock():
@@ -593,6 +691,9 @@ class TradingEngine:
                 self._last_known_pe_ltp = ltp
             if raw.position and raw.position.instrument_token == token:
                 raw.position.current_price = ltp
+                # v3: track peak premium for partial-book gate evaluation
+                if ltp > raw.position.peak_price:
+                    raw.position.peak_price = ltp
                 # Track last tick time for the open position (H5 — stale-price guard)
                 self._last_position_tick_at = time_module.monotonic()
 
@@ -620,6 +721,21 @@ class TradingEngine:
             self._last_candle_date = candle_date
             self._opening_rsi = indicators.get("rsi14")
 
+        # v3: classify day bias once on the first candle ≥09:50.
+        # Written to state but NOT yet consulted by entry gate (Phase 3).
+        if (
+            candle.timestamp.time() >= time_type(9, 50)
+            and state.day_bias == "PENDING"
+            and self._prev_close > 0
+        ):
+            today_candles = [c for c in state.candles if c.timestamp.date() == candle_date]
+            if len(today_candles) >= 4:
+                bias = classify_day_bias(today_candles, self._prev_close, self._cfg)
+                self._update_state(day_bias=bias, day_bias_set_at=datetime.now(IST))
+                logger.info("%s day_bias=%s (prev_close=%.2f)",
+                            self._instrument_name, bias, self._prev_close)
+                state = self._get_state()  # refresh local snapshot
+
         signal = Signal.NO_SIGNAL
         reason = ""
         trading_eligible = (
@@ -631,16 +747,10 @@ class TradingEngine:
         )
         if trading_eligible:
             signal, reason = generate_signal(
-                state.candles,
-                indicators["vwap"],
-                indicators["ema20"],
-                indicators["ema20_series"],
-                indicators["market_state"],
-                rsi14=indicators.get("rsi14"),
-                volume_surge=indicators.get("volume_surge", True),
-                efficiency=indicators.get("efficiency_ratio", 0.0),
-                opening_rsi=self._opening_rsi,
+                state=state,
+                indicators=indicators,
                 cfg=self._cfg,
+                opening_rsi=self._opening_rsi,
             )
             self._update_state(last_signal=signal.value)
 
@@ -669,7 +779,7 @@ class TradingEngine:
         if signal == Signal.NO_SIGNAL:
             return
 
-        allowed, block_reason = can_enter_trade(state)
+        allowed, block_reason = can_enter_trade(state, cfg=self._cfg, instrument=self._instrument_name)
         if not allowed:
             logger.info("%s entry blocked: %s", self._instrument_name, block_reason)
             _log_attempt(signal, state, indicators, block_reason,
@@ -748,6 +858,24 @@ class TradingEngine:
                     eff = round(abs(recent[-1].close - recent[0].close) / rng, 3)
 
             lot_size = int(instrument.get("lot_size") or self._cfg["lot_size"])
+
+            # v3: spot SL — cfg-driven; 999 = disabled (legacy behaviour)
+            sl_spot_pct = float(self._cfg.get("sl_spot_pct", 999.0))
+            spot_sl_price = 0.0
+            if sl_spot_pct < 999.0 and state.nifty_spot > 0:
+                if option_type == "CE":
+                    spot_sl_price = state.nifty_spot * (1 - sl_spot_pct / 100)
+                else:
+                    spot_sl_price = state.nifty_spot * (1 + sl_spot_pct / 100)
+
+            # v3: time-stop deadline — cfg-driven; 999 = disabled
+            time_stop_min = int(self._cfg.get("time_stop_min", 999))
+            entry_dt = datetime.now(IST)
+            time_stop_deadline = (
+                entry_dt + timedelta(minutes=time_stop_min)
+                if time_stop_min < 999 else None
+            )
+
             position = PositionInfo(
                 option_symbol=instrument["tradingsymbol"],
                 instrument_token=instrument["instrument_token"],
@@ -757,7 +885,7 @@ class TradingEngine:
                 entry_price=avg_price,
                 qty=lot_size,
                 order_id=order_id,
-                entry_time=datetime.now(IST),
+                entry_time=entry_dt,
                 reason_for_entry=reason,
                 current_price=avg_price,
                 trailing_sl_price=sl_price,
@@ -768,6 +896,14 @@ class TradingEngine:
                 rsi14_entry=indicators.get("rsi14") or 0.0,
                 market_state_entry=indicators.get("market_state", "UNKNOWN"),
                 efficiency_entry=eff,
+                # ── v3 fields ─────────────────────────────────────────
+                peak_price=avg_price,
+                qty_remaining=lot_size,
+                nifty_spot_high_seen=state.nifty_spot,
+                nifty_spot_low_seen=state.nifty_spot,
+                spot_sl_price=spot_sl_price,
+                time_stop_deadline=time_stop_deadline,
+                entry_mode_used=self._cfg.get("entry_mode", ""),
             )
             logger.info(
                 "%s ENTRY CONFIRMED | %s | entry=%.2f sl=%.2f (%.1f%%) | %s",
@@ -833,6 +969,7 @@ class TradingEngine:
             if raw.position is None:
                 return
             position = copy.copy(raw.position)
+            position.partial_legs = list(raw.position.partial_legs)
             raw.position = None  # cleared here — concurrent callers now see None and return early
 
         exit_price = position.current_price
@@ -841,12 +978,22 @@ class TradingEngine:
 
         mode = self._get_state().trading_mode
 
+        # Append final-exit leg so log_trade gets a complete legs[] picture
+        final_qty = position.qty_remaining if position.qty_remaining > 0 else position.qty
+        position.partial_legs.append({
+            "leg_id": len(position.partial_legs) + 1,
+            "qty": final_qty,
+            "exit_price": exit_price,
+            "exit_time": datetime.now(IST),
+            "reason": reason,
+        })
+
         try:
             if mode == "PAPER":
                 logger.info(
-                    "[PAPER] %s EXIT | %s | entry=%.2f exit=%.2f | reason=%s",
+                    "[PAPER] %s EXIT | %s | entry=%.2f exit=%.2f | reason=%s | legs=%d",
                     self._instrument_name, position.option_symbol,
-                    position.entry_price, exit_price, reason,
+                    position.entry_price, exit_price, reason, len(position.partial_legs),
                 )
             else:
                 kite = self._kite or require_authenticated_client()
@@ -857,9 +1004,10 @@ class TradingEngine:
             if reason == "STOPLOSS_HIT":
                 self._update_state(first_trade_was_sl=True)
 
-            nifty_spot_exit = self._get_state().nifty_spot
+            state_now = self._get_state()
+            nifty_spot_exit = state_now.nifty_spot
             log_trade(
-                trade_number=self._get_state().trades_today,
+                trade_number=state_now.trades_today,
                 option_symbol=position.option_symbol,
                 option_type=position.option_type,
                 strike=position.strike,
@@ -881,6 +1029,11 @@ class TradingEngine:
                 market_state_entry=position.market_state_entry,
                 efficiency_entry=position.efficiency_entry,
                 instrument=self._instrument_name,
+                # v3 metadata: legs populated by _execute_partial_exit + final leg
+                legs=position.partial_legs if len(position.partial_legs) > 1 else None,
+                day_bias=state_now.day_bias,
+                vix_at_entry=state_now.vix_ltp,
+                entry_mode=position.entry_mode_used or self._cfg.get("entry_mode", ""),
             )
 
             pnl = calculate_pnl(position.entry_price, exit_price, position.qty)
@@ -904,6 +1057,104 @@ class TradingEngine:
         except Exception as e:
             logger.error("%s exit failed: %s", self._instrument_name, e)
             self._update_state(error_message=f"Exit failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Partial exit execution (book a leg without closing the position)
+    # ------------------------------------------------------------------
+
+    def _execute_partial_exit(self, reason: str, qty_to_book: int) -> None:
+        """
+        Book a partial leg (50% at +7%, 30% at +14%) without closing the position.
+
+        Sets `partial_book_X_hit` BEFORE broker I/O so duplicate triggers don't
+        re-fire. On order failure, rolls the flag back so the next candle retries.
+        After the leg fills:
+          - decrements `qty_remaining`
+          - appends the leg to `position.partial_legs`
+          - on first partial: locks SL to entry-price (breakeven)
+        Does NOT log to paper_trade.csv — the final exit aggregates legs.
+        """
+        leg_id = (1 if reason == "PARTIAL_BOOK_1"
+                  else 2 if reason == "PARTIAL_BOOK_2"
+                  else 0)
+        if leg_id == 0:
+            logger.warning("Unknown partial exit reason: %s", reason)
+            return
+        if qty_to_book <= 0:
+            return
+
+        # 1. Atomically reserve the leg under lock
+        with self._get_lock():
+            raw = self._get_raw_state()
+            if raw.position is None:
+                return
+            if leg_id == 1 and raw.position.partial_book_1_hit:
+                return
+            if leg_id == 2 and raw.position.partial_book_2_hit:
+                return
+            if leg_id == 1:
+                raw.position.partial_book_1_hit = True
+            else:
+                raw.position.partial_book_2_hit = True
+            snapshot = copy.copy(raw.position)
+            snapshot.partial_legs = list(raw.position.partial_legs)
+
+        exit_price = snapshot.current_price
+        if exit_price <= 0:
+            exit_price = snapshot.entry_price
+
+        mode = self._get_state().trading_mode
+
+        # 2. Place broker order outside the lock
+        try:
+            if mode == "PAPER":
+                logger.info(
+                    "[PAPER] %s PARTIAL_EXIT | %s | qty=%d exit=%.2f | %s",
+                    self._instrument_name, snapshot.option_symbol,
+                    qty_to_book, exit_price, reason,
+                )
+            else:
+                kite = self._kite or require_authenticated_client()
+                place_partial_exit_order(kite, snapshot, qty_to_book, reason)
+        except Exception as e:
+            logger.error("%s partial exit failed: %s — rolling back flag",
+                         self._instrument_name, e)
+            with self._get_lock():
+                raw = self._get_raw_state()
+                if raw.position is None:
+                    return
+                if leg_id == 1:
+                    raw.position.partial_book_1_hit = False
+                else:
+                    raw.position.partial_book_2_hit = False
+            return
+
+        # 3. Update position state under lock
+        with self._get_lock():
+            raw = self._get_raw_state()
+            if raw.position is None:
+                return
+            raw.position.qty_remaining = max(0, raw.position.qty_remaining - qty_to_book)
+            raw.position.partial_legs.append({
+                "leg_id": leg_id,
+                "qty": qty_to_book,
+                "exit_price": exit_price,
+                "exit_time": datetime.now(IST),
+                "reason": reason,
+            })
+            if leg_id == 1:
+                # Move SL up to entry (breakeven) on the remaining quantity
+                raw.position.trailing_sl_price = max(
+                    raw.position.trailing_sl_price,
+                    raw.position.entry_price,
+                )
+                raw.position.breakeven_set = True
+
+        logger.info(
+            "%s PARTIAL_EXIT logged | leg=%d qty=%d exit=%.2f | qty_remaining=%d",
+            self._instrument_name, leg_id, qty_to_book, exit_price,
+            self._get_state().position.qty_remaining if self._get_state().position else 0,
+        )
 
     # ------------------------------------------------------------------
     # Monitoring loop
@@ -978,9 +1229,14 @@ class TradingEngine:
             raw_pos = self._get_raw_state().position
             if raw_pos is None:
                 return
-            should_exit, reason = check_exit_conditions(raw_pos)
+            action, reason, leg_qty = check_exit_conditions(raw_pos, state=state, cfg=self._cfg)
 
-        if not should_exit:
+        should_exit = (action == "FULL_EXIT")
+        if action == "PARTIAL_EXIT":
+            self._execute_partial_exit(reason=reason, qty_to_book=leg_qty)
+            return  # leg booked; opposite-signal checks happen on next pass
+
+        if not should_exit and action == "NONE":
             candles    = state.candles
             indicators = get_latest_indicators(candles) if len(candles) >= 22 else {}
             if indicators.get("enough_data") and detect_opposite_signal(

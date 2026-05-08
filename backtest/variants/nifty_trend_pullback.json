@@ -1,0 +1,11 @@
+{
+  "entry_mode": "trend_pullback",
+  "max_trades_per_day": 1,
+  "sl_spot_pct": 0.25,
+  "time_stop_min": 15,
+  "force_exit_time": "14:30",
+  "partial_book_enabled": true,
+  "vix_max": 22.0,
+  "strike_offset_ce": -1,
+  "strike_offset_pe": 1
+}

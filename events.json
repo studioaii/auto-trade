@@ -1,0 +1,11 @@
+{
+  "events": [
+    {"date": "2026-02-01", "type": "BUDGET", "instruments": ["NIFTY", "BANKNIFTY"], "note": "Union Budget"},
+    {"date": "2026-02-07", "type": "RBI_POLICY", "instruments": ["NIFTY", "BANKNIFTY"], "note": "RBI MPC"},
+    {"date": "2026-04-08", "type": "RBI_POLICY", "instruments": ["NIFTY", "BANKNIFTY"]},
+    {"date": "2026-06-05", "type": "RBI_POLICY", "instruments": ["NIFTY", "BANKNIFTY"]},
+    {"date": "2026-08-07", "type": "RBI_POLICY", "instruments": ["NIFTY", "BANKNIFTY"]},
+    {"date": "2026-10-09", "type": "RBI_POLICY", "instruments": ["NIFTY", "BANKNIFTY"]},
+    {"date": "2026-12-04", "type": "RBI_POLICY", "instruments": ["NIFTY", "BANKNIFTY"]}
+  ]
+}

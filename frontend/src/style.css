@@ -1178,3 +1178,18 @@ input[type=date]::-webkit-calendar-picker-indicator {
   flex-shrink: 0;
   margin-top: 1px;
 }
+
+/* ── v3: partial-leg pills & flags on the position banner ───────────────── */
+.pos-meta-orig    { color: var(--text-muted); font-weight: 400; margin-left: 2px; }
+.pos-flag         { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px; font-weight: 700; margin-right: 6px; vertical-align: middle; }
+.pos-flag-be      { background: rgba(16,185,129,0.18); color: var(--green); border: 1px solid rgba(16,185,129,0.35); }
+.pos-spot-sl      { color: var(--text-muted); font-size: 11px; margin-left: 6px; font-family: var(--font-mono); }
+
+.pos-legs         { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pos-leg-pill     { font-size: 11px; padding: 3px 10px; border-radius: 12px; font-weight: 600; font-family: var(--font-mono); border: 1px solid; }
+.pos-leg-pill.leg-done    { background: rgba(16,185,129,0.15); color: var(--green); border-color: rgba(16,185,129,0.4); }
+.pos-leg-pill.leg-pending { background: rgba(148,163,184,0.08); color: var(--text-muted); border-color: rgba(148,163,184,0.2); }
+.pos-peak         { font-size: 11px; color: var(--amber); font-family: var(--font-mono); margin-left: auto; }
+
+/* legs badge in trade table */
+.legs-badge       { display: inline-block; margin-left: 6px; font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 9px; background: rgba(96,165,250,0.15); color: #60a5fa; border: 1px solid rgba(96,165,250,0.3); cursor: help; vertical-align: middle; font-family: var(--font-mono); }

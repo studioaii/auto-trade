@@ -92,6 +92,21 @@ def get_atm_strike(spot_price: float, strike_interval: int = NIFTY_STRIKE_INTERV
     return round(spot_price / strike_interval) * strike_interval
 
 
+def get_strike_with_offset(
+    spot_price: float,
+    strike_interval: int,
+    offset: int = 0,
+) -> int:
+    """
+    Pick a strike at `offset` × strike_interval above/below the ATM strike.
+    offset = 0  → ATM
+    offset = -1 → 1 strike below ATM (ITM-CE / OTM-PE)
+    offset = +1 → 1 strike above ATM (OTM-CE / ITM-PE)
+    """
+    atm = get_atm_strike(spot_price, strike_interval)
+    return atm + offset * strike_interval
+
+
 def find_option_instrument(
     instruments: list[dict],
     expiry: date,

@@ -5,7 +5,7 @@
     <div class="page-header">
       <div>
         <div class="page-title">Bank Nifty Dashboard</div>
-        <div class="page-subtitle">BANK NIFTY Options · VWAP+EMA Breakout · 5-min candles</div>
+        <div class="page-subtitle">BANK NIFTY Options · {{ strategySubtitle }} · 5-min candles</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">
@@ -15,16 +15,8 @@
       </div>
     </div>
 
-    <!-- ── DAY BLOCKED BANNER ── -->
-    <div v-if="status.day_blocked" class="day-blocked-banner">
-      <span class="blocked-icon">⛔</span>
-      <span>
-        <b>All trades blocked for today</b> — Opening RSI was
-        <b style="color:#fbbf24">{{ status.opening_rsi }}</b>,
-        which is outside the safe range (25–80).
-        BankNifty tends to whipsaw violently on extreme-open days.
-      </span>
-    </div>
+    <!-- ── v3 STRATEGY STATUS BANNER (day_bias, VIX, event, block reason) ── -->
+    <StrategyStatusBanner :status="status" />
 
     <!-- ── ENGINE CONTROL ── -->
     <div class="card engine-card">
@@ -65,7 +57,7 @@
       <div v-if="msg.text" class="msg-box" :class="msg.type">{{ msg.text }}</div>
 
       <div class="strat-note">
-        VWAP + EMA(20) · Dynamic SL (12–22%) · Trailing SL from +20% · RSI + Volume filters · Max 2 trades/day · 9:50–14:00 entries · Force exit 3:20 PM · Lot size: 30
+        {{ strategyNote }}
       </div>
     </div>
 
@@ -133,10 +125,23 @@
           <div class="pos-sym">{{ status.position.symbol }}</div>
           <div class="pos-meta">
             <span class="pill" :class="status.position.option_type === 'CE' ? 'pill-ce' : 'pill-pe'" style="margin-right:6px">{{ status.position.option_type }}</span>
-            Strike {{ status.position.strike }} · Expiry {{ status.position.expiry }} · Qty {{ status.position.qty }}
+            Strike {{ status.position.strike }} · Expiry {{ status.position.expiry }}
+            · Qty {{ status.position.qty_remaining || status.position.qty }}<span v-if="hasPartialActivity" class="pos-meta-orig">/{{ status.position.qty }}</span>
           </div>
           <div class="pos-sl">
-            {{ status.position.trail_active ? '🔁 Trail SL: ₹' + status.position.trailing_sl + ' (trailing active)' : 'SL: ₹' + status.position.trailing_sl }}
+            <span v-if="status.position.breakeven_set" class="pos-flag pos-flag-be">🟢 BE locked</span>
+            {{ status.position.trail_active ? '🔁 Trail SL: ₹' + status.position.trailing_sl + ' (trailing)' : 'SL: ₹' + status.position.trailing_sl }}
+            <span v-if="status.position.spot_sl_price > 0" class="pos-spot-sl">· Spot SL: {{ status.position.spot_sl_price }}</span>
+          </div>
+          <div v-if="status.position.partial_book_1_hit || status.position.partial_book_2_hit || status.position.peak_price > 0"
+               class="pos-legs">
+            <span class="pos-leg-pill" :class="status.position.partial_book_1_hit ? 'leg-done' : 'leg-pending'">
+              {{ status.position.partial_book_1_hit ? '✓' : '○' }} Book 1 (+7%)
+            </span>
+            <span class="pos-leg-pill" :class="status.position.partial_book_2_hit ? 'leg-done' : 'leg-pending'">
+              {{ status.position.partial_book_2_hit ? '✓' : '○' }} Book 2 (+14%)
+            </span>
+            <span v-if="status.position.peak_price > 0" class="pos-peak">Peak ₹{{ status.position.peak_price }}</span>
           </div>
         </div>
         <div style="text-align:right">
@@ -229,7 +234,10 @@
               <td :style="{ color: parseFloat(t.pnl_pct) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }">
                 {{ parseFloat(t.pnl_pct) >= 0 ? '+' : '' }}{{ t.pnl_pct }}%
               </td>
-              <td><span class="pill pill-exit">{{ t.reason_for_exit }}</span></td>
+              <td>
+                <span class="pill pill-exit">{{ t.reason_for_exit }}</span>
+                <span v-if="legCount(t) > 1" class="legs-badge" :title="legsTooltip(t)">{{ legCount(t) }} legs</span>
+              </td>
               <td>
                 <span v-if="t.reason_for_entry" :title="t.reason_for_entry" style="cursor:help;color:var(--text-muted);font-size:11px">ℹ hover</span>
                 <span v-else style="color:var(--text-muted)">—</span>
@@ -258,6 +266,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import CandlestickChart from '../components/CandlestickChart.vue'
+import StrategyStatusBanner from '../components/StrategyStatusBanner.vue'
 
 const status      = ref({})
 const candles     = ref([])
@@ -344,6 +353,55 @@ const pnlDisplay = computed(() => {
   const sign = pnl.pnl_rupees >= 0 ? '+' : ''
   return sign + '₹' + pnl.pnl_rupees + ' (' + sign + pnl.pnl_pct + '%)'
 })
+
+const strategySubtitle = computed(() => {
+  const m = status.value.entry_mode
+  if (m === 'trend_pullback')   return 'Trend-Pullback v3'
+  if (m === 'mean_reversion')   return 'Mean-Reversion v3'
+  if (m === 'vwap_ema_breakout') return 'VWAP+EMA (legacy v2)'
+  return 'Strategy'
+})
+
+const strategyNote = computed(() => {
+  const m = status.value.entry_mode
+  const ft = status.value.force_exit_time || '15:20'
+  const mt = status.value.max_trades || 2
+  if (m === 'trend_pullback') {
+    return `Trend Pullback · 1-strike-ITM · Spot SL 0.25% · Partial book +7%/+14% · Trail 4% · Max ${mt}/day · Force exit ${ft} · Lot size 30`
+  }
+  if (m === 'mean_reversion') {
+    return `Mean Reversion · Fade failed-spike · 1-strike-ITM · Spot SL 0.35% · Partial book +7%/+14% · Hold ≤ 90 min · Max ${mt}/day · Force exit ${ft} · Lot size 30`
+  }
+  return `VWAP + EMA(20) · Dynamic SL 12–22% · Trailing SL from +20% · RSI + Volume filters · Max ${mt}/day · Force exit ${ft} · Lot size 30`
+})
+
+const hasPartialActivity = computed(() => {
+  const p = status.value.position
+  if (!p) return false
+  return p.partial_book_1_hit || p.partial_book_2_hit ||
+         (p.qty_remaining && p.qty_remaining !== p.qty)
+})
+
+function legCount(t) {
+  if (!t) return 0
+  let n = 0
+  for (let i = 1; i <= 3; i++) {
+    if (t['leg_' + i + '_qty'] && t['leg_' + i + '_qty'] !== '') n += 1
+  }
+  return n
+}
+
+function legsTooltip(t) {
+  const parts = []
+  for (let i = 1; i <= 3; i++) {
+    const q = t['leg_' + i + '_qty']
+    const px = t['leg_' + i + '_exit_price']
+    const tm = t['leg_' + i + '_exit_time']
+    const r  = t['leg_' + i + '_reason']
+    if (q && q !== '') parts.push(`Leg ${i}: ${q} @ ₹${px} ${tm} (${r})`)
+  }
+  return parts.join('\n')
+}
 
 async function refreshAll() {
   try {

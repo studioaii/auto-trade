@@ -1,0 +1,12 @@
+{
+  "entry_mode": "mean_reversion",
+  "max_trades_per_day": 1,
+  "sl_spot_pct": 0.35,
+  "time_stop_min": 10,
+  "force_exit_time": "14:30",
+  "hold_ceiling_min": 90,
+  "partial_book_enabled": true,
+  "vix_max": 22.0,
+  "strike_offset_ce": -1,
+  "strike_offset_pe": 1
+}

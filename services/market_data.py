@@ -165,6 +165,9 @@ class MarketDataService:
         # Tick-liveness watchdog: monotonic timestamp of the most recent tick batch.
         # None = no clock yet (fresh start or just after a forced restart).
         self._last_tick_at: Optional[float] = None
+        # Meta tokens (e.g., India VIX) — LTP-only, routed via callback.
+        # Bypasses InstrumentSubscription's candle/spot pipeline.
+        self._meta_callbacks: dict[int, Callable[[float], None]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -426,6 +429,25 @@ class MarketDataService:
         for tok in (sub.option_tokens or []):
             self._token_to_instrument[tok] = sub.instrument_name
 
+    def subscribe_meta_token(self, token: int, on_ltp: Callable[[float], None]) -> None:
+        """
+        Register an LTP-only token (e.g., India VIX = 264969).
+        Bypasses the InstrumentSubscription candle/spot pipeline.
+        Safe to call before or after start(); subscription happens on connect.
+        """
+        with self._lock:
+            self._meta_callbacks[token] = on_ltp
+            ticker = self._ticker if self._connected else None
+        if ticker:
+            try:
+                ticker.subscribe([token])
+                ticker.set_mode(ticker.MODE_LTP, [token])
+                logger.info("Meta token %d subscribed (live)", token)
+            except Exception:
+                logger.exception("Failed to subscribe meta token %d", token)
+        else:
+            logger.info("Meta token %d registered — will subscribe on connect", token)
+
     def _subscribe_tokens_for(self, sub: InstrumentSubscription) -> None:
         """Subscribe and set modes for one instrument's tokens. Ticker must be running."""
         if not self._ticker:
@@ -478,9 +500,19 @@ class MarketDataService:
         if ltp_mode_tokens:
             ws.set_mode(ws.MODE_LTP, ltp_mode_tokens)
 
+        # Meta tokens (VIX et al.) — LTP-only, separate from instrument subs
+        with self._lock:
+            meta_tokens = list(self._meta_callbacks.keys())
+        if meta_tokens:
+            try:
+                ws.subscribe(meta_tokens)
+                ws.set_mode(ws.MODE_LTP, meta_tokens)
+            except Exception:
+                logger.exception("Failed to subscribe meta tokens on connect")
+
         logger.info(
-            "WebSocket connected | instruments=%s | tokens=%d",
-            [s.instrument_name for s in subs], len(all_tokens),
+            "WebSocket connected | instruments=%s | tokens=%d | meta=%d",
+            [s.instrument_name for s in subs], len(all_tokens), len(meta_tokens),
         )
 
         # Backfill candles for each instrument in background
@@ -651,6 +683,16 @@ class MarketDataService:
         for tick in ticks:
             token = tick.get("instrument_token")
             ltp   = tick.get("last_price", 0)
+
+            # Meta tokens (e.g. India VIX) — route LTP via callback and continue
+            meta_cb = self._meta_callbacks.get(token)
+            if meta_cb is not None:
+                if ltp > 0:
+                    try:
+                        meta_cb(ltp)
+                    except Exception:
+                        logger.exception("Meta callback failed for token %d", token)
+                continue
 
             instrument_name = self._token_to_instrument.get(token)
             if not instrument_name:

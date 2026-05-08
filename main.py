@@ -36,6 +36,16 @@ async def lifespan(app: FastAPI):
     logger.info("Logesh Auto Trading Engine starting up")
     from services.daily_scheduler import get_scheduler
     get_scheduler().start()
+
+    # India VIX (token 264969) — LTP-only subscription on the shared WebSocket.
+    # Activates once an engine starts the ticker; benign if no engine is ever started.
+    try:
+        from services.market_data import get_market_data_service
+        from services import vix_state
+        get_market_data_service().subscribe_meta_token(264969, vix_state.set_vix_ltp)
+    except Exception:
+        logger.exception("Failed to register India VIX meta-token (non-fatal)")
+
     yield
     logger.info("Logesh Auto Trading Engine shutting down")
     from services.strategy_engine import get_nifty_engine, get_banknifty_engine

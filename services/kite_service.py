@@ -1,10 +1,15 @@
 import json
 import logging
 import os
+import time
 from kiteconnect import KiteConnect
 from config import API_KEY, API_SECRET
 
 logger = logging.getLogger(__name__)
+
+
+class TransientKiteError(Exception):
+    """Zerodha gateway/network blip — retryable. The request_token may still be valid."""
 
 _TOKEN_FILE = os.path.join(os.path.dirname(__file__), "..", ".kite_session.json")
 
@@ -64,13 +69,58 @@ def get_login_url() -> str:
     return kite.login_url()
 
 
-def generate_session(request_token: str) -> dict:
+_TRANSIENT_MARKERS = (
+    "503",
+    "service unavailable",
+    "unknown content-type (text/html)",
+    "bad gateway",
+    "504",
+    "gateway timeout",
+    "connection reset",
+    "connection aborted",
+    "max retries exceeded",
+)
+
+
+def _is_transient(err: Exception) -> bool:
+    """Return True for upstream-gateway blips where the request_token wasn't consumed."""
+    msg = str(err).lower()
+    return any(m in msg for m in _TRANSIENT_MARKERS)
+
+
+def generate_session(request_token: str, max_attempts: int = 3) -> dict:
+    """
+    Exchange request_token for access_token.
+
+    On transient gateway errors (503/504/HTML/network), retry up to
+    `max_attempts` times with exponential backoff. If still failing,
+    raise `TransientKiteError` so the caller can recover (e.g. redirect
+    back to /login for a fresh request_token).
+    Permanent errors (invalid/expired token) raise `ValueError` immediately.
+    """
     kite = KiteConnect(api_key=API_KEY)
-    try:
-        data = kite.generate_session(request_token, api_secret=API_SECRET)
-    except Exception as e:
-        logger.error("Failed to generate session: %s", e)
-        raise ValueError(f"Invalid request_token or session generation failed: {e}") from e
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            data = kite.generate_session(request_token, api_secret=API_SECRET)
+            break
+        except Exception as e:
+            last_err = e
+            if _is_transient(e) and attempt < max_attempts:
+                backoff = 0.4 * (2 ** (attempt - 1))   # 0.4, 0.8, 1.6 s
+                logger.warning(
+                    "Zerodha session-gen transient (attempt %d/%d) — retrying in %.1fs: %s",
+                    attempt, max_attempts, backoff, e,
+                )
+                time.sleep(backoff)
+                continue
+            if _is_transient(e):
+                logger.error("Zerodha session-gen transient — exhausted retries: %s", e)
+                raise TransientKiteError(str(e)) from e
+            logger.error("Failed to generate session (permanent): %s", e)
+            raise ValueError(f"Invalid request_token or session generation failed: {e}") from e
+    else:  # all retries exhausted with transient error
+        raise TransientKiteError(str(last_err)) from last_err
 
     _token_store["access_token"] = data["access_token"]
     _token_store["public_token"] = data.get("public_token")

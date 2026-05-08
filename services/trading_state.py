@@ -43,6 +43,23 @@ class PositionInfo:
     rsi14_entry: Optional[float] = None
     market_state_entry: str = "UNKNOWN"
     efficiency_entry: float = 0.0       # directional efficiency ratio at entry
+    # ── v3 fields (additive — defaults preserve legacy behaviour) ──────
+    # Running max LTP since entry — distinct from highest_price_seen
+    # (which is reset by trail logic). Used by partial-book gate.
+    peak_price: float = 0.0
+    # Partial booking flags
+    partial_book_1_hit: bool = False
+    partial_book_2_hit: bool = False
+    qty_remaining: int = 0              # decremented on each partial fill
+    partial_legs: list = field(default_factory=list)
+    # Spot-based SL tracking
+    nifty_spot_high_seen: float = 0.0
+    nifty_spot_low_seen: float = 0.0
+    spot_sl_price: float = 0.0          # spot threshold; 0 = disabled
+    # Time-stop deadline (entry + cfg["time_stop_min"]); None = disabled
+    time_stop_deadline: Optional[datetime] = None
+    # Records which strategy variant fired this entry
+    entry_mode_used: str = ""
 
 
 @dataclass
@@ -66,6 +83,15 @@ class TradingState:
     error_message: Optional[str] = None
     # Sticky SL-block flag: survives engine stop/restart within the same process lifetime
     first_trade_was_sl: bool = False
+    # ── v3 fields (additive — defaults preserve legacy behaviour) ────────
+    day_bias: str = "PENDING"           # "PENDING" | "UP" | "DOWN" | "NEUTRAL" | "NO_TRADE"
+    day_bias_set_at: Optional[datetime] = None
+    event_today: str = ""               # populated at engine start; "" = no event
+    vix_ltp: float = 0.0                # snapshot from vix_state for /status payload
+    failed_reversion_attempts_today: int = 0   # BNF mean-reversion sticky counter
+    pending_spike_window: Optional[dict] = None  # BNF working memory
+    session_high: float = 0.0           # today's running high (for pullback gate)
+    session_low: float = 0.0            # today's running low
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +118,8 @@ class InstrumentStateManager:
             # prevents torn reads across trailing_sl_price / highest_price_seen / trail_active.
             if self._state.position is not None:
                 snap.position = copy.copy(self._state.position)
+                # v3: also copy the partial_legs list so torn-read of mutating list is impossible
+                snap.position.partial_legs = list(self._state.position.partial_legs)
             return snap
 
     def update_state(self, **kwargs) -> None:
@@ -129,6 +157,15 @@ class InstrumentStateManager:
             self._state.pnl = None
             self._state.error_message = None
             self._state.first_trade_was_sl = False
+            # v3 fields
+            self._state.day_bias = "PENDING"
+            self._state.day_bias_set_at = None
+            self._state.event_today = ""
+            self._state.vix_ltp = 0.0
+            self._state.failed_reversion_attempts_today = 0
+            self._state.pending_spike_window = None
+            self._state.session_high = 0.0
+            self._state.session_low = 0.0
         logger.info("Daily state reset | instrument=%s mode=%s", self._instrument_name, mode)
 
 
@@ -146,6 +183,7 @@ def get_state() -> TradingState:
         snap.candles = list(_state.candles)
         if _state.position is not None:
             snap.position = copy.copy(_state.position)
+            snap.position.partial_legs = list(_state.position.partial_legs)
         return snap
 
 
@@ -187,4 +225,12 @@ def reset_daily_state(mode: str = "PAPER") -> None:
         _state.pnl = None
         _state.error_message = None
         _state.first_trade_was_sl = False
+        _state.day_bias = "PENDING"
+        _state.day_bias_set_at = None
+        _state.event_today = ""
+        _state.vix_ltp = 0.0
+        _state.failed_reversion_attempts_today = 0
+        _state.pending_spike_window = None
+        _state.session_high = 0.0
+        _state.session_low = 0.0
     logger.info("Daily trading state reset | mode=%s", mode)

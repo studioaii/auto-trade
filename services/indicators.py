@@ -129,6 +129,22 @@ def candle_range_pct(c: Candle) -> float:
     return (c.high - c.low) / c.close * 100
 
 
+def upper_wick_pct(c: Candle) -> float:
+    """Upper wick as % of total range. 0 if doji or zero range."""
+    rng = c.high - c.low
+    if rng <= 0:
+        return 0.0
+    return (c.high - max(c.open, c.close)) / rng * 100
+
+
+def lower_wick_pct(c: Candle) -> float:
+    """Lower wick as % of total range. 0 if doji or zero range."""
+    rng = c.high - c.low
+    if rng <= 0:
+        return 0.0
+    return (min(c.open, c.close) - c.low) / rng * 100
+
+
 def is_spike_candle(c: Candle, spike_threshold: float = 1.0) -> bool:
     """Returns True if candle moved more than spike_threshold% — avoid trading these."""
     return candle_range_pct(c) > spike_threshold
