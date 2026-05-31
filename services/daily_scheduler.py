@@ -81,6 +81,9 @@ class DailyScheduler:
     def _start_engines(self) -> None:
         from services.kite_service import require_authenticated_client
         from services.strategy_engine import get_nifty_engine, get_banknifty_engine
+        from services.strategy_engine_v2 import get_banknifty2_engine
+        from services.nifty_engine_v2 import get_nifty2_engine
+        from services.nifty_fut_engine import get_nifty_fut_engine
 
         try:
             kite = require_authenticated_client()
@@ -88,8 +91,8 @@ class DailyScheduler:
             logger.error("DailyScheduler auto-start: auth failed — %s", exc)
             return
 
-        for engine in (get_nifty_engine(), get_banknifty_engine()):
-            name = engine._instrument_name
+        for engine in (get_nifty_engine(), get_banknifty_engine(), get_banknifty2_engine(), get_nifty2_engine(), get_nifty_fut_engine()):
+            name = getattr(engine, "_instrument_name", type(engine).__name__)
             try:
                 # Force-stop if stuck / already running so we get a clean slate
                 state = engine.get_status()
@@ -101,11 +104,27 @@ class DailyScheduler:
                 logger.info("DailyScheduler: %s engine started successfully", name)
 
             except Exception as exc:
-                logger.error("DailyScheduler: failed to start %s — %s", name, exc)
+                logger.error("DailyScheduler: failed to start %s — %s", name, exc, exc_info=True)
+
+        # If the shared WebSocket is still using a connection from before today
+        # (e.g. an overnight reconnect attempt that bound a stale access token),
+        # force a fresh socket now that engines have been re-registered with
+        # today's token. This avoids the user having to restart the whole app.
+        from services.market_data import get_market_data_service
+        mds = get_market_data_service()
+        with mds._lock:
+            running   = mds._running
+            connected = mds._connected
+        if running and not connected:
+            logger.info("DailyScheduler: WS registered but not connected — forcing fresh reconnect")
+            try:
+                mds.force_reconnect()
+            except Exception as exc:
+                logger.error("DailyScheduler: force_reconnect failed — %s", exc, exc_info=True)
 
     def _force_stop_engine(self, engine, kite) -> None:
         """Attempt a clean stop; if it fails, forcibly reset engine state."""
-        name = engine._instrument_name
+        name = getattr(engine, "_instrument_name", type(engine).__name__)
         try:
             engine.stop(kite)
         except Exception as exc:
@@ -128,6 +147,9 @@ class DailyScheduler:
     def _stop_engines(self) -> None:
         from services.kite_service import get_stored_token, require_authenticated_client
         from services.strategy_engine import get_nifty_engine, get_banknifty_engine
+        from services.strategy_engine_v2 import get_banknifty2_engine
+        from services.nifty_engine_v2 import get_nifty2_engine
+        from services.nifty_fut_engine import get_nifty_fut_engine
 
         kite = None
         if get_stored_token():
@@ -136,8 +158,8 @@ class DailyScheduler:
             except Exception as exc:
                 logger.warning("DailyScheduler auto-stop: auth error — %s", exc)
 
-        for engine in (get_nifty_engine(), get_banknifty_engine()):
-            name = engine._instrument_name
+        for engine in (get_nifty_engine(), get_banknifty_engine(), get_banknifty2_engine(), get_nifty2_engine(), get_nifty_fut_engine()):
+            name = getattr(engine, "_instrument_name", type(engine).__name__)
             try:
                 state = engine.get_status()
                 if not state["engine_running"]:
@@ -159,7 +181,7 @@ class DailyScheduler:
                     engine._state_mgr.update_state(engine_running=False)
 
             except Exception as exc:
-                logger.error("DailyScheduler: failed to stop %s — %s", name, exc)
+                logger.error("DailyScheduler: failed to stop %s — %s", name, exc, exc_info=True)
 
 
 # Module-level singleton

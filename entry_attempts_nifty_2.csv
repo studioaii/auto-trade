@@ -1,0 +1,4 @@
+date,time,model,signal,outcome,spot,atm_strike,option_ltp,vwap,vwap_dist_pct,rsi14,body_pct,or_high,or_low,skip_reasons,reason
+2026-05-29,09:35:00,ANY,NO_SIGNAL,SKIPPED,23898.5,23900,0.0,24019.62,-0.504,52.28,1.67,,,body 2% < 55,
+2026-05-29,09:40:00,ANY,NO_SIGNAL,SKIPPED,23923.05,23900,0.0,24018.45,-0.397,58.92,57.45,24055.0,23970.0,vwap dist 0.03% < min,
+2026-05-29,09:45:00,M2_ORB,BUY_PE,FIRED,23875.65,23900,130.55,24015.75,-0.583,48.0,80.13,24055.0,23970.0,,M2 | break ORL=23970 close=23964 | RSI=48

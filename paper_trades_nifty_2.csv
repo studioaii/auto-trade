@@ -1,0 +1,2 @@
+date,trade_number,model,option_symbol,option_type,strike,expiry,entry_time,entry_price,exit_time,exit_price,qty,pnl_points,pnl_rupees,pnl_pct,result,mfe_pct,spot_entry,spot_exit,vwap_entry,ema20_entry,rsi14_entry,hard_sl_premium,sl_pct,reason_for_entry,exit_layer,reason_for_exit,breakeven_set,trail_active
+2026-05-29,1,M2_ORB,NIFTY2660223900PE,PE,23900,2026-06-02,09:45:00,130.55,09:45:19,130.4,65,-0.15,-9.75,-0.11,LOSS,3.33,23875.65,23875.6,24015.75,23982.05,48.0,117.5,10.0,M2 | break ORL=23970 close=23964 | RSI=48,HARD_SL,SL hit | sl=130.55 cur=130.40 pnl=-0.1%,True,False

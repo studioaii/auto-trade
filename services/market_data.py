@@ -157,8 +157,8 @@ class MarketDataService:
         self._lock = threading.Lock()
         # instrument_name -> InstrumentSubscription
         self._subscriptions: dict[str, InstrumentSubscription] = {}
-        # token -> instrument_name (fast routing)
-        self._token_to_instrument: dict[int, str] = {}
+        # token -> list[instrument_name] (multi-routing: same token can feed several engines)
+        self._token_to_instrument: dict[int, list[str]] = {}
         self._watchdog_thread: Optional[threading.Thread] = None
         self._disconnected_at: Optional[float] = None   # monotonic time of last disconnect
         self._monitor_thread: Optional[threading.Thread] = None
@@ -316,20 +316,24 @@ class MarketDataService:
         tokens_to_remove = []
         remaining = 0
 
+        tokens_to_unsubscribe: list[int] = []
         with self._lock:
             sub = self._subscriptions.pop(instrument_name, None)
             if sub:
-                tokens_to_remove = [sub.index_token]
+                candidate_tokens = [sub.index_token]
                 if sub.futures_token:
-                    tokens_to_remove.append(sub.futures_token)
-                tokens_to_remove.extend(sub.option_tokens or [])
-                for tok in tokens_to_remove:
-                    self._token_to_instrument.pop(tok, None)
+                    candidate_tokens.append(sub.futures_token)
+                candidate_tokens.extend(sub.option_tokens or [])
+                for tok in candidate_tokens:
+                    self._unroute_token(tok, instrument_name)
+                    # Only unsubscribe from KiteTicker if no other instrument still wants this token
+                    if tok not in self._token_to_instrument:
+                        tokens_to_unsubscribe.append(tok)
             remaining = len(self._subscriptions)
 
-        if tokens_to_remove and self._ticker:
+        if tokens_to_unsubscribe and self._ticker:
             try:
-                self._ticker.unsubscribe(tokens_to_remove)
+                self._ticker.unsubscribe(tokens_to_unsubscribe)
             except Exception as e:
                 logger.warning("Failed to unsubscribe %s tokens: %s", instrument_name, e)
 
@@ -389,23 +393,31 @@ class MarketDataService:
         self, instrument_name: str, old_tokens: list[int], new_tokens: list[int]
     ) -> None:
         """Unsubscribe old option tokens and subscribe new ones (ATM reselection)."""
+        tokens_to_unsubscribe_kite: list[int] = []
+        tokens_to_subscribe_kite: list[int] = []
         with self._lock:
             sub = self._subscriptions.get(instrument_name)
             if sub:
                 for tok in sub.option_tokens:
-                    self._token_to_instrument.pop(tok, None)
+                    self._unroute_token(tok, instrument_name)
+                    # Only unsubscribe from broker if no other instrument needs this token
+                    if tok not in self._token_to_instrument:
+                        tokens_to_unsubscribe_kite.append(tok)
                 sub.option_tokens = list(new_tokens)
                 for tok in new_tokens:
-                    self._token_to_instrument[tok] = instrument_name
+                    # Only subscribe at the broker if this token isn't already routed elsewhere
+                    if tok not in self._token_to_instrument:
+                        tokens_to_subscribe_kite.append(tok)
+                    self._route_token(tok, instrument_name)
 
         if not self._ticker:
             return
         try:
-            if old_tokens:
-                self._ticker.unsubscribe(old_tokens)
-            if new_tokens:
-                self._ticker.subscribe(new_tokens)
-                self._ticker.set_mode(self._ticker.MODE_LTP, new_tokens)
+            if tokens_to_unsubscribe_kite:
+                self._ticker.unsubscribe(tokens_to_unsubscribe_kite)
+            if tokens_to_subscribe_kite:
+                self._ticker.subscribe(tokens_to_subscribe_kite)
+                self._ticker.set_mode(self._ticker.MODE_LTP, tokens_to_subscribe_kite)
             logger.info(
                 "Option subscriptions swapped | %s | old=%s → new=%s",
                 instrument_name, old_tokens, new_tokens,
@@ -420,11 +432,27 @@ class MarketDataService:
     def _add_subscription_locked(self, sub: InstrumentSubscription) -> None:
         """Register subscription and update token routing. Call with self._lock held."""
         self._subscriptions[sub.instrument_name] = sub
-        self._token_to_instrument[sub.index_token] = sub.instrument_name
+        self._route_token(sub.index_token, sub.instrument_name)
         if sub.futures_token:
-            self._token_to_instrument[sub.futures_token] = sub.instrument_name
+            self._route_token(sub.futures_token, sub.instrument_name)
         for tok in (sub.option_tokens or []):
-            self._token_to_instrument[tok] = sub.instrument_name
+            self._route_token(tok, sub.instrument_name)
+
+    def _route_token(self, token: int, instrument_name: str) -> None:
+        """Add instrument to the routing list for this token (dedup)."""
+        names = self._token_to_instrument.setdefault(token, [])
+        if instrument_name not in names:
+            names.append(instrument_name)
+
+    def _unroute_token(self, token: int, instrument_name: str) -> None:
+        """Remove instrument from token routing; drop the entry if list becomes empty."""
+        names = self._token_to_instrument.get(token)
+        if not names:
+            return
+        if instrument_name in names:
+            names.remove(instrument_name)
+        if not names:
+            self._token_to_instrument.pop(token, None)
 
     def _subscribe_tokens_for(self, sub: InstrumentSubscription) -> None:
         """Subscribe and set modes for one instrument's tokens. Ticker must be running."""
@@ -433,14 +461,17 @@ class MarketDataService:
         try:
             tokens = [sub.index_token]
             full_mode = [sub.index_token]
+            quote_mode = []
             if sub.futures_token:
                 tokens.append(sub.futures_token)
-                full_mode.append(sub.futures_token)
+                quote_mode.append(sub.futures_token)
             if sub.option_tokens:
                 tokens.extend(sub.option_tokens)
 
             self._ticker.subscribe(tokens)
             self._ticker.set_mode(self._ticker.MODE_FULL, full_mode)
+            if quote_mode:
+                self._ticker.set_mode(self._ticker.MODE_QUOTE, quote_mode)
             if sub.option_tokens:
                 self._ticker.set_mode(self._ticker.MODE_LTP, sub.option_tokens)
         except Exception as e:
@@ -463,18 +494,21 @@ class MarketDataService:
             self._last_tick_at = _time.monotonic()  # start tick-liveness clock
             subs = list(self._subscriptions.values())
 
+        quote_mode_tokens = []
         for sub in subs:
             all_tokens.append(sub.index_token)
             full_mode_tokens.append(sub.index_token)
             if sub.futures_token:
                 all_tokens.append(sub.futures_token)
-                full_mode_tokens.append(sub.futures_token)
+                quote_mode_tokens.append(sub.futures_token)
             if sub.option_tokens:
                 all_tokens.extend(sub.option_tokens)
                 ltp_mode_tokens.extend(sub.option_tokens)
 
         ws.subscribe(all_tokens)
         ws.set_mode(ws.MODE_FULL, full_mode_tokens)
+        if quote_mode_tokens:
+            ws.set_mode(ws.MODE_QUOTE, quote_mode_tokens)
         if ltp_mode_tokens:
             ws.set_mode(ws.MODE_LTP, ltp_mode_tokens)
 
@@ -652,34 +686,36 @@ class MarketDataService:
             token = tick.get("instrument_token")
             ltp   = tick.get("last_price", 0)
 
-            instrument_name = self._token_to_instrument.get(token)
-            if not instrument_name:
+            instrument_names = self._token_to_instrument.get(token)
+            if not instrument_names:
                 continue
 
-            sub = self._subscriptions.get(instrument_name)
-            if not sub:
-                continue
+            # Fan out to every engine subscribed to this token
+            for instrument_name in instrument_names:
+                sub = self._subscriptions.get(instrument_name)
+                if not sub:
+                    continue
 
-            candle_token = sub.futures_token or sub.index_token
+                candle_token = sub.futures_token or sub.index_token
 
-            if token == sub.index_token:
-                # Spot price from index (official level)
-                if sub.spot_callback and ltp > 0:
-                    sub.spot_callback(ltp)
-                # Build candles from index only when no futures available
-                if candle_token == sub.index_token:
+                if token == sub.index_token:
+                    # Spot price from index (official level)
+                    if sub.spot_callback and ltp > 0:
+                        sub.spot_callback(ltp)
+                    # Build candles from index only when no futures available
+                    if candle_token == sub.index_token:
+                        self._process_candle_tick(tick, ltp, sub)
+
+                elif token == sub.futures_token:
+                    # Build candles from futures (real volume)
                     self._process_candle_tick(tick, ltp, sub)
+                    if ltp > 0:
+                        sub.update_state_fn(nifty_futures_ltp=ltp)
 
-            elif token == sub.futures_token:
-                # Build candles from futures (real volume)
-                self._process_candle_tick(tick, ltp, sub)
-                if ltp > 0:
-                    sub.update_state_fn(nifty_futures_ltp=ltp)
-
-            else:
-                # Option LTP
-                if sub.option_ltp_callback and ltp > 0:
-                    sub.option_ltp_callback(token, ltp)
+                else:
+                    # Option LTP
+                    if sub.option_ltp_callback and ltp > 0:
+                        sub.option_ltp_callback(token, ltp)
 
     def _process_candle_tick(self, tick: dict, ltp: float, sub: InstrumentSubscription) -> None:
         volume = tick.get("volume_traded", 0)

@@ -1,0 +1,3 @@
+date,time,model,signal,outcome,spot,atm_strike,option_ltp,vwap,vwap_dist_pct,rsi14,body_pct,vol_ratio,day_class,quality_score,skip_reasons,reason
+2026-05-21,11:25:00,C_LIQUIDITY_SWEEP,BUY_CE,SKIPPED,53707.05,53700,0.0,53875.99,-0.314,49.51,75.1,1.217,NORMAL_DAY,5,quality=5/10;vol 1.22x not in 1.3–2.5;VWAP dist 0.15%;EMA slope -37.3;multi-candle 1/3;thin breakout margin,Model C | swept low 53727→53605 | confirmed
+2026-05-21,13:00:00,B_FIRST_PULLBACK,BUY_PE,SKIPPED,53276.25,53300,0.0,53738.73,-0.861,22.66,77.84,0.861,NORMAL_DAY,0,RSI 22.7 < 32.0,Model B | sig@-4 body=62% vol=2.28x | pullback 43% held VWAP
