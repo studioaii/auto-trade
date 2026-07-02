@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
 
 LOG_PATHS = {
-    "NIFTY":     "entry_attempts_nifty.csv",
-    "BANKNIFTY": "entry_attempts_banknifty.csv",
+    "NIFTY": "entry_attempts_nifty.csv",
 }
 LOG_PATH = LOG_PATHS["NIFTY"]   # backward-compat alias
 

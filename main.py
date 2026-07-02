@@ -8,10 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from routers import (
-    auth, trading, auto_trading, auto_trading_v2, auto_trading_nifty2,
-    auto_trading_nifty_fut,
-)
+from routers import auth, trading, auto_trading, auto_trading_nifty2
 
 # ---------------------------------------------------------------------------
 # Logging — rotated, cwd-independent
@@ -41,15 +38,13 @@ async def lifespan(app: FastAPI):
     get_scheduler().start()
     yield
     logger.info("Logesh Auto Trading Engine shutting down")
-    from services.strategy_engine import get_nifty_engine, get_banknifty_engine
-    from services.strategy_engine_v2 import get_banknifty2_engine
+    from services.strategy_engine import get_nifty_engine
     from services.nifty_engine_v2 import get_nifty2_engine
-    from services.nifty_fut_engine import get_nifty_fut_engine
     from services.kite_service import get_stored_token, require_authenticated_client
     if get_stored_token():
         try:
             kite = require_authenticated_client()
-            for eng in (get_nifty_engine(), get_banknifty_engine(), get_banknifty2_engine(), get_nifty2_engine(), get_nifty_fut_engine()):
+            for eng in (get_nifty_engine(), get_nifty2_engine()):
                 try:
                     if eng.get_status()["engine_running"]:
                         eng.stop(kite)
@@ -71,9 +66,7 @@ app = FastAPI(
 app.include_router(auth.router)
 app.include_router(trading.router)
 app.include_router(auto_trading.router)
-app.include_router(auto_trading_v2.router)
 app.include_router(auto_trading_nifty2.router)
-app.include_router(auto_trading_nifty_fut.router)
 
 
 # ---------------------------------------------------------------------------
@@ -82,14 +75,8 @@ app.include_router(auto_trading_nifty_fut.router)
 _PROTECTED_PREFIXES = (
     "/auto-trading/start",
     "/auto-trading/stop",
-    "/auto-trading/banknifty/start",
-    "/auto-trading/banknifty/stop",
-    "/auto-trading/banknifty2/start",
-    "/auto-trading/banknifty2/stop",
     "/auto-trading/nifty2/start",
     "/auto-trading/nifty2/stop",
-    "/auto-trading/nifty-fut/start",
-    "/auto-trading/nifty-fut/stop",
 )
 _ALLOWED_ORIGINS = {
     "http://127.0.0.1:8000",

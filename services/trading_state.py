@@ -76,7 +76,7 @@ class InstrumentStateManager:
     """
     Owns a TradingState + Lock for one instrument.
     The Nifty engine uses the module-level singleton below (backward compat).
-    The BankNifty engine gets its own InstrumentStateManager instance.
+    Each engine (NIFTY v1, NIFTY v2) gets its own InstrumentStateManager instance.
     """
 
     def __init__(self, instrument_name: str = "NIFTY"):

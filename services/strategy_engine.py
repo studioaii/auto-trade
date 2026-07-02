@@ -1,6 +1,6 @@
 """
 Multi-instrument VWAP+EMA Breakout Trading Engine.
-Supports NIFTY and BANKNIFTY independently with a shared WebSocket.
+Runs the NIFTY engine on a shared WebSocket (instrument-agnostic core).
 PAPER mode: simulates trades, logs to CSV. LIVE mode: places real Kite orders.
 """
 import copy
@@ -84,7 +84,7 @@ def _log_attempt(
 class TradingEngine:
     """
     Orchestrates all services for VWAP+EMA breakout intraday options trading.
-    Instrument-agnostic: pass instrument_name="NIFTY" or "BANKNIFTY".
+    Instrument-agnostic: pass instrument_name="NIFTY".
     """
 
     def __init__(
@@ -1005,17 +1005,10 @@ class TradingEngine:
 _nifty_state_mgr = InstrumentStateManager("NIFTY")
 _nifty_engine    = TradingEngine("NIFTY",     _nifty_state_mgr)
 
-_banknifty_state_mgr = InstrumentStateManager("BANKNIFTY")
-_banknifty_engine    = TradingEngine("BANKNIFTY", _banknifty_state_mgr)
-
 
 def get_engine(instrument: str = "NIFTY") -> TradingEngine:
-    return _banknifty_engine if instrument.upper() == "BANKNIFTY" else _nifty_engine
+    return _nifty_engine
 
 
 def get_nifty_engine() -> TradingEngine:
     return _nifty_engine
-
-
-def get_banknifty_engine() -> TradingEngine:
-    return _banknifty_engine

@@ -13,7 +13,7 @@
         <div class="brand-icon">⚡</div>
         <div class="brand-text">
           <div class="brand-name">AutoTrade</div>
-          <div class="brand-sub">Multi-Instrument Engine</div>
+          <div class="brand-sub">NIFTY Options Engine</div>
         </div>
       </div>
 
@@ -22,21 +22,9 @@
           <span class="nav-icon">📊</span>
           <span class="nav-label">NIFTY 50</span>
         </RouterLink>
-        <RouterLink to="/banknifty" class="nav-item">
-          <span class="nav-icon">🏦</span>
-          <span class="nav-label">BANK NIFTY</span>
-        </RouterLink>
-        <RouterLink to="/banknifty2" class="nav-item">
-          <span class="nav-icon">🚀</span>
-          <span class="nav-label">BANK NIFTY 2.0</span>
-        </RouterLink>
         <RouterLink to="/nifty2" class="nav-item">
           <span class="nav-icon">✨</span>
           <span class="nav-label">NIFTY 2.0</span>
-        </RouterLink>
-        <RouterLink to="/nifty-fut" class="nav-item">
-          <span class="nav-icon">📈</span>
-          <span class="nav-label">NIFTY FUTURES</span>
         </RouterLink>
         <RouterLink to="/portfolio" class="nav-item">
           <span class="nav-icon">💼</span>
@@ -57,27 +45,15 @@
             <span>NIFTY 50</span>
           </div>
           <div class="engine-status-row">
-            <div class="dot" :class="bnRunning ? 'on' : 'off'" style="flex-shrink:0"></div>
-            <span>BANK NIFTY</span>
-          </div>
-          <div class="engine-status-row">
-            <div class="dot" :class="bn2Running ? 'on' : 'off'" style="flex-shrink:0"></div>
-            <span>BANK NIFTY 2.0</span>
-          </div>
-          <div class="engine-status-row">
             <div class="dot" :class="n2Running ? 'on' : 'off'" style="flex-shrink:0"></div>
             <span>NIFTY 2.0</span>
           </div>
-          <div class="engine-status-row">
-            <div class="dot" :class="futRunning ? 'on' : 'off'" style="flex-shrink:0"></div>
-            <span>NIFTY FUTURES</span>
-          </div>
         </div>
         <div class="engine-ctrl-btns">
-          <button class="btn g-btn engine-ctrl-btn" :disabled="globalLoading || (niftyRunning && bnRunning && bn2Running && n2Running && futRunning)" @click="startAll">
+          <button class="btn g-btn engine-ctrl-btn" :disabled="globalLoading || (niftyRunning && n2Running)" @click="startAll">
             ▶ Start All
           </button>
-          <button class="btn r-btn engine-ctrl-btn" :disabled="globalLoading || (!niftyRunning && !bnRunning && !bn2Running && !n2Running && !futRunning)" @click="stopAll">
+          <button class="btn r-btn engine-ctrl-btn" :disabled="globalLoading || (!niftyRunning && !n2Running)" @click="stopAll">
             ■ Stop All
           </button>
         </div>
@@ -115,10 +91,7 @@ const userName        = ref('')
 
 // Global engine state (polled every 5s)
 const niftyRunning  = ref(false)
-const bnRunning     = ref(false)
-const bn2Running    = ref(false)
 const n2Running     = ref(false)
-const futRunning    = ref(false)
 const globalLoading = ref(false)
 const globalMsg     = ref('')
 const globalMsgType = ref('')
@@ -150,18 +123,12 @@ async function checkAuth() {
 
 async function pollEngineStatus() {
   try {
-    const [nr, br, br2, n2, fut] = await Promise.all([
+    const [nr, n2] = await Promise.all([
       fetch('/auto-trading/status'),
-      fetch('/auto-trading/banknifty/status'),
-      fetch('/auto-trading/banknifty2/status'),
       fetch('/auto-trading/nifty2/status'),
-      fetch('/auto-trading/nifty-fut/status'),
     ])
-    if (nr.ok)  { const d = await nr.json();  niftyRunning.value = d.engine_running }
-    if (br.ok)  { const d = await br.json();  bnRunning.value    = d.engine_running }
-    if (br2.ok) { const d = await br2.json(); bn2Running.value   = d.engine_running }
-    if (n2.ok)  { const d = await n2.json();  n2Running.value    = d.engine_running }
-    if (fut.ok) { const d = await fut.json(); futRunning.value   = d.engine_running }
+    if (nr.ok) { const d = await nr.json(); niftyRunning.value = d.engine_running }
+    if (n2.ok) { const d = await n2.json(); n2Running.value    = d.engine_running }
   } catch (_) {}
 }
 
@@ -172,7 +139,7 @@ async function startAll() {
   const startedList = []
   const errorList   = []
   try {
-    // v1: NIFTY + BANKNIFTY in one call
+    // v1: NIFTY
     const r = await fetch('/auto-trading/start-all', { method: 'POST' })
     const d = await r.json()
     if (r.ok && d.results) {
@@ -184,18 +151,6 @@ async function startAll() {
       errorList.push('v1: ' + d.detail)
     }
 
-    // v2: BANKNIFTY_2 separate call
-    if (!bn2Running.value) {
-      try {
-        const r2 = await fetch('/auto-trading/banknifty2/start', { method: 'POST' })
-        const d2 = await r2.json()
-        if (r2.ok) startedList.push('BANKNIFTY_2')
-        else errorList.push('BANKNIFTY_2: ' + (d2.detail || 'unknown'))
-      } catch (e) {
-        errorList.push('BANKNIFTY_2: ' + e)
-      }
-    }
-
     // v2: NIFTY_2 separate call
     if (!n2Running.value) {
       try {
@@ -205,18 +160,6 @@ async function startAll() {
         else errorList.push('NIFTY_2: ' + (d3.detail || 'unknown'))
       } catch (e) {
         errorList.push('NIFTY_2: ' + e)
-      }
-    }
-
-    // Futures: NIFTY_FUT separate call
-    if (!futRunning.value) {
-      try {
-        const r4 = await fetch('/auto-trading/nifty-fut/start', { method: 'POST' })
-        const d4 = await r4.json()
-        if (r4.ok) startedList.push('NIFTY_FUT')
-        else errorList.push('NIFTY_FUT: ' + (d4.detail || 'unknown'))
-      } catch (e) {
-        errorList.push('NIFTY_FUT: ' + e)
       }
     }
 
@@ -242,16 +185,6 @@ async function stopAll() {
     const d = await r.json()
     if (!r.ok && d?.detail) errorList.push('v1: ' + d.detail)
 
-    if (bn2Running.value) {
-      try {
-        const r2 = await fetch('/auto-trading/banknifty2/stop', { method: 'POST' })
-        const d2 = await r2.json()
-        if (!r2.ok) errorList.push('BANKNIFTY_2: ' + (d2.detail || 'unknown'))
-      } catch (e) {
-        errorList.push('BANKNIFTY_2: ' + e)
-      }
-    }
-
     if (n2Running.value) {
       try {
         const r3 = await fetch('/auto-trading/nifty2/stop', { method: 'POST' })
@@ -259,16 +192,6 @@ async function stopAll() {
         if (!r3.ok) errorList.push('NIFTY_2: ' + (d3.detail || 'unknown'))
       } catch (e) {
         errorList.push('NIFTY_2: ' + e)
-      }
-    }
-
-    if (futRunning.value) {
-      try {
-        const r4 = await fetch('/auto-trading/nifty-fut/stop', { method: 'POST' })
-        const d4 = await r4.json()
-        if (!r4.ok) errorList.push('NIFTY_FUT: ' + (d4.detail || 'unknown'))
-      } catch (e) {
-        errorList.push('NIFTY_FUT: ' + e)
       }
     }
 

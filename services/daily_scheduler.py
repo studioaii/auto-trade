@@ -1,7 +1,7 @@
 """
 DailyScheduler — runs as a background daemon thread to:
-  • Auto-start both engines at 09:15 IST (force-restart if stuck)
-  • Auto-stop  both engines at 15:35 IST
+  • Auto-start the NIFTY v1 + v2 engines at 09:15 IST (force-restart if stuck)
+  • Auto-stop  them at 15:35 IST
 """
 import logging
 import threading
@@ -80,10 +80,8 @@ class DailyScheduler:
 
     def _start_engines(self) -> None:
         from services.kite_service import require_authenticated_client
-        from services.strategy_engine import get_nifty_engine, get_banknifty_engine
-        from services.strategy_engine_v2 import get_banknifty2_engine
+        from services.strategy_engine import get_nifty_engine
         from services.nifty_engine_v2 import get_nifty2_engine
-        from services.nifty_fut_engine import get_nifty_fut_engine
 
         try:
             kite = require_authenticated_client()
@@ -91,7 +89,7 @@ class DailyScheduler:
             logger.error("DailyScheduler auto-start: auth failed — %s", exc)
             return
 
-        for engine in (get_nifty_engine(), get_banknifty_engine(), get_banknifty2_engine(), get_nifty2_engine(), get_nifty_fut_engine()):
+        for engine in (get_nifty_engine(), get_nifty2_engine()):
             name = getattr(engine, "_instrument_name", type(engine).__name__)
             try:
                 # Force-stop if stuck / already running so we get a clean slate
@@ -146,10 +144,8 @@ class DailyScheduler:
 
     def _stop_engines(self) -> None:
         from services.kite_service import get_stored_token, require_authenticated_client
-        from services.strategy_engine import get_nifty_engine, get_banknifty_engine
-        from services.strategy_engine_v2 import get_banknifty2_engine
+        from services.strategy_engine import get_nifty_engine
         from services.nifty_engine_v2 import get_nifty2_engine
-        from services.nifty_fut_engine import get_nifty_fut_engine
 
         kite = None
         if get_stored_token():
@@ -158,7 +154,7 @@ class DailyScheduler:
             except Exception as exc:
                 logger.warning("DailyScheduler auto-stop: auth error — %s", exc)
 
-        for engine in (get_nifty_engine(), get_banknifty_engine(), get_banknifty2_engine(), get_nifty2_engine(), get_nifty_fut_engine()):
+        for engine in (get_nifty_engine(), get_nifty2_engine()):
             name = getattr(engine, "_instrument_name", type(engine).__name__)
             try:
                 state = engine.get_status()

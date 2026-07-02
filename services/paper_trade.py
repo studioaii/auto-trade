@@ -1,7 +1,7 @@
 """
 Paper trading logger — records every simulated trade to CSV.
 No real orders are placed. Entry/exit prices come from live LTP via WebSocket.
-Separate CSV files per instrument: paper_trades_nifty.csv, paper_trades_banknifty.csv
+Separate CSV files per instrument: paper_trades_nifty.csv
 """
 import csv
 import logging
@@ -15,8 +15,7 @@ IST = ZoneInfo("Asia/Kolkata")
 _ROOT = os.path.dirname(os.path.dirname(__file__))
 
 CSV_PATHS = {
-    "NIFTY":     os.path.join(_ROOT, "paper_trades_nifty.csv"),
-    "BANKNIFTY": os.path.join(_ROOT, "paper_trades_banknifty.csv"),
+    "NIFTY": os.path.join(_ROOT, "paper_trades_nifty.csv"),
 }
 # Backward-compat alias
 CSV_PATH = CSV_PATHS["NIFTY"]

@@ -95,7 +95,7 @@ HEADERS = [
 
 def _log_path(date_str: str, instrument: str = "NIFTY") -> str:
     os.makedirs(LOG_DIR, exist_ok=True)
-    prefix = "banknifty" if instrument.upper() == "BANKNIFTY" else "nifty"
+    prefix = "nifty"
     return os.path.join(LOG_DIR, f"{prefix}_candles_{date_str}.csv")
 
 
@@ -264,9 +264,6 @@ def list_log_files(instrument: str = "") -> list[dict]:
         if fname.startswith("nifty_candles_"):
             inst = "NIFTY"
             date_str = fname[len("nifty_candles_"):-len(".csv")]
-        elif fname.startswith("banknifty_candles_"):
-            inst = "BANKNIFTY"
-            date_str = fname[len("banknifty_candles_"):-len(".csv")]
         elif fname.startswith("candles_"):   # old format — treat as NIFTY
             inst = "NIFTY"
             date_str = fname[len("candles_"):-len(".csv")]

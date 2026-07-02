@@ -1,7 +1,7 @@
 """
 NIFTY 2.0 — REST endpoints.
 
-Mirrors the BankNifty 2.0 routes but targets the dedicated NIFTY 2.0 engine
+Start/stop/status routes for the dedicated NIFTY 2.0 engine
 and CSV files. Mounted at /auto-trading/nifty2/...
 """
 import asyncio

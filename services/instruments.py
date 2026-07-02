@@ -30,10 +30,6 @@ def _get_nfo_instruments(kite: KiteConnect) -> list[dict]:
     return data
 NIFTY_STRIKE_INTERVAL = 50   # Nifty options strike gap
 
-# BankNifty index instrument token
-BANKNIFTY_INDEX_TOKEN = 260105
-BANKNIFTY_STRIKE_INTERVAL = 100   # BankNifty options strike gap
-
 
 # ---------------------------------------------------------------------------
 # Generic helpers (instrument-agnostic)
@@ -42,7 +38,7 @@ BANKNIFTY_STRIKE_INTERVAL = 100   # BankNifty options strike gap
 def fetch_instruments(kite: KiteConnect, instrument_name: str) -> list[dict]:
     """
     Downloads full NFO instrument dump and filters to current-week
-    CE/PE options for the given instrument name (e.g. "NIFTY", "BANKNIFTY").
+    CE/PE options for the given instrument name (e.g. "NIFTY").
     """
     logger.info("Fetching NFO instruments for %s ...", instrument_name)
     all_instruments = _get_nfo_instruments(kite)
@@ -167,19 +163,3 @@ def get_nifty_index_token() -> int:
 
 def find_nifty_futures(kite: KiteConnect) -> dict:
     return find_futures(kite, "NIFTY")
-
-
-# ---------------------------------------------------------------------------
-# BankNifty-specific wrappers
-# ---------------------------------------------------------------------------
-
-def fetch_banknifty_instruments(kite: KiteConnect) -> list[dict]:
-    return fetch_instruments(kite, "BANKNIFTY")
-
-
-def get_banknifty_index_token() -> int:
-    return BANKNIFTY_INDEX_TOKEN
-
-
-def find_banknifty_futures(kite: KiteConnect) -> dict:
-    return find_futures(kite, "BANKNIFTY")

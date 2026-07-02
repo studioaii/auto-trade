@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from kiteconnect.exceptions import TokenException, NetworkException
 
 from services.kite_service import require_authenticated_client
-from services.strategy_engine import get_engine, get_nifty_engine, get_banknifty_engine
+from services.strategy_engine import get_engine, get_nifty_engine
 from services.paper_trade import read_trades, get_summary, CSV_PATHS
 from services.candle_logger import list_log_files, LOG_DIR
 
@@ -93,12 +93,12 @@ async def _stop_engine(instrument: str):
 
 @router.post("/start-all")
 async def start_all():
-    """Start both NIFTY and BANKNIFTY engines with a single call."""
+    """Start the NIFTY engine (kept for dashboard compatibility)."""
     kite = _get_kite()
     results = {}
     errors  = {}
 
-    for instrument in ("NIFTY", "BANKNIFTY"):
+    for instrument in ("NIFTY",):
         engine = get_engine(instrument)
         state  = engine.get_status()
         if state["engine_running"]:
@@ -121,18 +121,18 @@ async def start_all():
     return {
         "results": results,
         "errors":  errors,
-        "message": "Both engines started. Waiting 22 candles (~1h 50m) for warm indicators.",
+        "message": "NIFTY engine started. Waiting 22 candles (~1h 50m) for warm indicators.",
     }
 
 
 @router.post("/stop-all")
 async def stop_all():
-    """Stop both NIFTY and BANKNIFTY engines with a single call."""
+    """Stop the NIFTY engine (kept for dashboard compatibility)."""
     kite = _get_kite()
     results = {}
     errors  = {}
 
-    for instrument in ("NIFTY", "BANKNIFTY"):
+    for instrument in ("NIFTY",):
         engine = get_engine(instrument)
         state  = engine.get_status()
         if not state["engine_running"]:
@@ -208,62 +208,6 @@ async def download_nifty_paper_log():
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="No NIFTY paper trades logged yet")
     return FileResponse(path=path, media_type="text/csv", filename="paper_trades_nifty.csv")
-
-
-# ===========================================================================
-# BANKNIFTY endpoints
-# ===========================================================================
-
-@router.post("/banknifty/start")
-async def start_banknifty():
-    return await _start_engine("BANKNIFTY")
-
-
-@router.post("/banknifty/stop")
-async def stop_banknifty():
-    return await _stop_engine("BANKNIFTY")
-
-
-@router.get("/banknifty/status")
-async def get_banknifty_status():
-    now = _time.monotonic()
-    cached = _STATUS_CACHE.get("BANKNIFTY")
-    if cached and now - cached[0] < _STATUS_TTL:
-        return cached[1]
-    result = get_banknifty_engine().get_status()
-    _STATUS_CACHE["BANKNIFTY"] = (now, result)
-    return result
-
-
-@router.get("/banknifty/paper-log")
-async def get_banknifty_paper_log():
-    return {
-        "trades":  read_trades("BANKNIFTY"),
-        "summary": get_summary("BANKNIFTY"),
-    }
-
-
-@router.get("/banknifty/candles")
-async def get_banknifty_candles():
-    return await _get_candles_for("BANKNIFTY")
-
-
-@router.get("/banknifty/candle-log/list")
-async def list_banknifty_candle_logs():
-    return {"files": list_log_files("BANKNIFTY")}
-
-
-@router.get("/banknifty/candle-log/download/{date}")
-async def download_banknifty_candle_log(date: str):
-    return _download_candle_log(date, "BANKNIFTY")
-
-
-@router.get("/banknifty/paper-log/download")
-async def download_banknifty_paper_log():
-    path = CSV_PATHS["BANKNIFTY"]
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="No BANKNIFTY paper trades logged yet")
-    return FileResponse(path=path, media_type="text/csv", filename="paper_trades_banknifty.csv")
 
 
 # ===========================================================================
@@ -345,7 +289,7 @@ async def _get_candles_for(instrument: str):
 
 
 def _download_candle_log(date: str, instrument: str):
-    prefix = "banknifty" if instrument == "BANKNIFTY" else "nifty"
+    prefix = "nifty"
     path   = os.path.join(LOG_DIR, f"{prefix}_candles_{date}.csv")
     # Also try old format for NIFTY
     if not os.path.exists(path) and instrument == "NIFTY":
