@@ -1,17 +1,27 @@
 """
 NIFTY 2.0 — Risk Management.
 
-Single-layer, tight risk:
-  • Hard SL at −10% (cap losses fast)
-  • Target +12% (book and walk away)
-  • Breakeven: SL → entry once pnl ≥ +6%
-  • Trailing: activates at +7%, gap 2.5% below peak
-  • Time stop: after 6 candles (30 min), exit IF pnl < 0
-  • Force exit at 15:15 IST
-  • Cooldown: 4 candles between trades
-  • Daily limits: max 2 trades, block 2nd after hard SL
+This mirrors NIFTY 1.0's wide-tail risk profile (the edge is a fat tail of
++18..+35% trailing winners; tight targets / time-stops destroy it):
 
-All functions are pure — engine reads state, calls these, acts on the result.
+  • Hard SL at −18% (v1 value — cuts dead-loser bleed without clipping the
+    deep-dip-then-recover winners; the +29% winner dipped to −15.4% first).
+  • Trailing SL: activates at +15% gain, gap 6% below peak, tightens 1% per
+    additional +10% gain, floored at 3%. Trail SL only ever moves up.
+  • NO fixed target, NO breakeven move, NO time-stop (all three were rejected
+    by the analysis — they kill the tail or chop winners flat).
+  • Opposite-signal exit is orchestrated by the engine (needs candle/VWAP
+    context + the 2-consecutive-close confirmation); it is not evaluated here.
+  • Force exit at 15:20 IST.
+  • Daily gates: max 2 trades, block 2nd entry after a hard SL, optional
+    candle cooldown (default 0 = off, matching v1), entry window 09:50–14:00
+    (the 11:00 morning wall was removed 2026-07-02 — its forward test blocked
+    only winners; chop protection now lives in the strategy's session gate).
+
+Instrumentation: extras track tick-resolution MFE (max_pnl_pct_seen) AND MAE
+(min_pnl_pct_seen) — updated on every call (tick + candle).
+
+All functions are pure — the engine reads state, calls these, acts on the result.
 """
 from __future__ import annotations
 
@@ -21,35 +31,33 @@ from enum import Enum
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from services.trading_state import Candle
-
 IST = ZoneInfo("Asia/Kolkata")
 
 
 class N2ExitLayer(str, Enum):
-    NONE        = "NONE"
-    HARD_SL     = "HARD_SL"     # true −10% floor hit (no BE move yet) — trips skip_second_after_hard_sl
-    BE_STOP     = "BE_STOP"     # SL=entry was tightened by breakeven, then hit; near-flat exit, does NOT trip second-entry block
-    TARGET      = "TARGET"
-    TRAIL_SL    = "TRAIL_SL"
-    TIME_STOP   = "TIME_STOP"
-    TIME_FORCE  = "TIME_FORCE_EXIT"
-    MANUAL_STOP = "MANUAL_STOP"
+    NONE            = "NONE"
+    STOPLOSS_HIT    = "STOPLOSS_HIT"     # hard −18% floor hit (trips skip_second_after_hard_sl)
+    TRAILING_STOP   = "TRAILING_STOP"    # trailing SL hit after it armed (a profitable exit)
+    OPPOSITE_SIGNAL = "OPPOSITE_SIGNAL"  # confirmed reverse breakout (engine-driven)
+    TIME_EXIT       = "TIME_EXIT"        # 15:20 force exit
+    MANUAL_STOP     = "MANUAL_STOP"      # engine stop / shutdown
 
 
 @dataclass
 class N2PositionExtras:
-    """Engine-managed extras tracking trail/MFE/candle count for v2 NIFTY."""
-    model:               str = "NONE"
+    """Engine-managed extras tracking trail / MFE / MAE / candle count."""
+    model:               str = "V1_BREAKOUT"
     entry_spot:          float = 0.0
     entry_vwap:          float = 0.0
-    hard_sl_premium:     float = 0.0      # initial entry × (1 − sl_pct/100)
-    trail_sl_premium:    float = 0.0      # current SL — starts = hard_sl_premium, only moves up
-    breakeven_set:       bool = False
+    hard_sl_premium:     float = 0.0      # entry × (1 − sl_pct/100)
+    trail_sl_premium:    float = 0.0      # current SL — starts = hard_sl, only moves up
+    breakeven_set:       bool = False     # unused (no BE in wide-tail); kept for log compat
     trail_active:        bool = False
     peak_premium:        float = 0.0
     candles_since_entry: int = 0
-    max_pnl_pct_seen:    float = -100.0
+    max_pnl_pct_seen:    float = -100.0   # MFE (tick resolution)
+    min_pnl_pct_seen:    float = 100.0    # MAE (tick resolution)
+    consec_wrong_side_vwap: int = 0       # consecutive candle closes on the wrong VWAP side
 
 
 @dataclass
@@ -57,7 +65,7 @@ class N2ExitDecision:
     should_exit: bool = False
     layer:       N2ExitLayer = N2ExitLayer.NONE
     reason:      str = ""
-    new_sl_premium: Optional[float] = None    # if non-None, engine updates trail SL
+    new_sl_premium: Optional[float] = None    # if non-None, engine updates trail SL display
 
 
 # ---------------------------------------------------------------------------
@@ -89,33 +97,71 @@ def can_enter_trade_n2(
             and gate.first_trade_was_sl
             and cfg.get("skip_second_after_hard_sl", True)):
         return False, "second entry blocked — first trade hit hard SL"
-    # cooldown (candle count)
-    if gate.last_exit_candle_idx >= 0:
-        cooldown = cfg.get("cooldown_candles", 4)
-        if gate.current_candle_idx - gate.last_exit_candle_idx < cooldown:
-            left = cooldown - (gate.current_candle_idx - gate.last_exit_candle_idx)
-            return False, f"cooldown — {left} candles left"
-    # time window (also enforced by strategy, but belt-and-braces here)
-    start = time(*cfg.get("entry_window_start", (9, 35)))
-    end   = time(*cfg.get("entry_window_end",   (13, 30)))
+    # optional cooldown (candle count) — default 0 = off (v1 has no cooldown)
+    cooldown = cfg.get("cooldown_candles", 0)
+    if cooldown > 0 and gate.last_exit_candle_idx >= 0:
+        elapsed = gate.current_candle_idx - gate.last_exit_candle_idx
+        if elapsed < cooldown:
+            return False, f"cooldown — {cooldown - elapsed} candles left"
+    # time window — v1 session start (09:50) and v1 last-entry (14:00)
+    start = time(*cfg.get("entry_window_start", (9, 50)))
+    end   = time(*cfg.get("entry_window_end",   (14, 0)))
     if now.time() < start:
-        return False, f"before entry window ({start})"
+        return False, f"before entry window ({start.strftime('%H:%M')})"
     if now.time() >= end:
-        return False, f"past last entry ({end})"
+        return False, f"past last entry ({end.strftime('%H:%M')})"
     return True, ""
 
 
 # ---------------------------------------------------------------------------
-# SL/target initialisation at entry
+# SL initialisation at entry
 # ---------------------------------------------------------------------------
 
 def initial_sl_target(entry_premium: float, cfg: dict) -> tuple[float, float, float]:
-    """Returns (hard_sl_premium, target_premium, sl_pct_used)."""
-    sl_pct     = cfg.get("sl_pct", 10.0)
-    target_pct = cfg.get("target_pct", 12.0)
-    hard_sl    = round(entry_premium * (1 - sl_pct / 100.0), 2)
-    target_px  = round(entry_premium * (1 + target_pct / 100.0), 2)
-    return hard_sl, target_px, sl_pct
+    """
+    Returns (hard_sl_premium, target_premium, sl_pct_used).
+    target_premium is 0.0 — the wide-tail strategy has NO fixed target; it
+    exits via trailing SL, opposite signal, or time. Returned for signature
+    compatibility with the engine/logger only.
+    """
+    sl_pct  = cfg.get("sl_pct", 18.0)
+    hard_sl = round(entry_premium * (1 - sl_pct / 100.0), 2)
+    return hard_sl, 0.0, sl_pct
+
+
+# ---------------------------------------------------------------------------
+# Trailing-stop update (v1 dynamic gap)
+# ---------------------------------------------------------------------------
+
+def _update_trail(extras: N2PositionExtras, current: float, pnl_pct: float, cfg: dict) -> Optional[float]:
+    """
+    v1 trailing logic. Mutates extras in place. Returns the new SL premium if it
+    moved up this call, else None.
+
+      - Activates at trail_trigger_pct (+15%)
+      - Gap starts at trail_gap_base_pct (6%) below the peak
+      - Each extra +10% gain tightens the gap by trail_gap_step_pct (1%)
+      - Gap floored at trail_gap_min_pct (3%); SL only ever moves up
+    """
+    trig = cfg.get("trail_trigger_pct", 15.0)
+    if pnl_pct < trig:
+        return None
+
+    extras.trail_active = True
+    if current > extras.peak_premium:
+        extras.peak_premium = current
+
+    base  = cfg.get("trail_gap_base_pct", 6.0)
+    step  = cfg.get("trail_gap_step_pct", 1.0)
+    floor = cfg.get("trail_gap_min_pct", 3.0)
+    extra_steps = int((pnl_pct - trig) / 10)
+    gap = max(base - extra_steps * step, floor)
+
+    new_sl = extras.peak_premium * (1 - gap / 100.0)
+    if new_sl > extras.trail_sl_premium:
+        extras.trail_sl_premium = new_sl
+        return new_sl
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -129,70 +175,43 @@ def evaluate_exit_n2(
     extras: N2PositionExtras,
     cfg: dict,
     now: Optional[datetime] = None,
+    allow_sl_moves: bool = True,
 ) -> N2ExitDecision:
     """
     Priority:
-      0. force-exit time
-      1. target hit (+12%)
-      2. SL hit (hard or trailing)
-      3. time-stop after N candles if pnl < 0
-      4. breakeven / trail updates (returns new_sl_premium, no exit)
-    Mutates extras (peak / MFE / candles_since_entry caller-managed; this fn
-    updates peak and max_pnl_pct_seen only).
+      0. force-exit time (15:20)
+      1. SL hit — hard (−18%) or trailing
+      2. trailing-SL update (returns new_sl_premium, no exit)
+    MFE/MAE are updated on EVERY call (tick + candle) for tick-resolution
+    instrumentation. The trailing SL only ARMS on confirmed candle closes
+    (allow_sl_moves=True) so a single anomalous tick can't inflate the peak /
+    arm the trail; the SL LEVEL itself is still checked on every tick so exits
+    stay tick-fast. Opposite-signal exit is handled by the engine, not here.
     """
     now = now or datetime.now(IST)
 
-    force_t = time(*cfg.get("force_exit_hhmm", (15, 15)))
+    force_t = time(*cfg.get("force_exit_hhmm", (15, 20)))
     if now.time() >= force_t:
-        return N2ExitDecision(True, N2ExitLayer.TIME_FORCE, f"force exit at {force_t}")
+        return N2ExitDecision(True, N2ExitLayer.TIME_EXIT, f"force exit at {force_t.strftime('%H:%M')}")
 
     if current_price <= 0 or entry_price <= 0:
         return N2ExitDecision(False, N2ExitLayer.NONE, "")
 
     pnl_pct = (current_price - entry_price) / entry_price * 100.0
     extras.max_pnl_pct_seen = max(extras.max_pnl_pct_seen, pnl_pct)
-    if current_price > extras.peak_premium:
-        extras.peak_premium = current_price
+    extras.min_pnl_pct_seen = min(extras.min_pnl_pct_seen, pnl_pct)
 
-    target_pct = cfg.get("target_pct", 12.0)
-    if pnl_pct >= target_pct:
-        return N2ExitDecision(True, N2ExitLayer.TARGET,
-                              f"target +{pnl_pct:.1f}% ≥ {target_pct:.0f}%")
+    moved_sl = _update_trail(extras, current_price, pnl_pct, cfg) if allow_sl_moves else None
 
-    # SL hit
+    # SL hit — trail_sl_premium starts equal to the hard SL and only moves up.
     sl_level = extras.trail_sl_premium if extras.trail_sl_premium > 0 else extras.hard_sl_premium
     if sl_level > 0 and current_price <= sl_level:
-        if extras.trail_active:
-            layer = N2ExitLayer.TRAIL_SL
-        elif extras.breakeven_set:
-            layer = N2ExitLayer.BE_STOP
-        else:
-            layer = N2ExitLayer.HARD_SL
+        layer = N2ExitLayer.TRAILING_STOP if extras.trail_active else N2ExitLayer.STOPLOSS_HIT
         return N2ExitDecision(True, layer,
                               f"SL hit | sl={sl_level:.2f} cur={current_price:.2f} pnl={pnl_pct:.1f}%")
 
-    # Time stop — only fires if still losing after N candles
-    ts_n = cfg.get("time_stop_candles", 6)
-    if extras.candles_since_entry >= ts_n and pnl_pct < 0:
-        return N2ExitDecision(True, N2ExitLayer.TIME_STOP,
-                              f"time stop {extras.candles_since_entry}c pnl={pnl_pct:.1f}%")
-
-    # Breakeven move
-    be_pct = cfg.get("breakeven_at_pct", 6.0)
-    if not extras.breakeven_set and pnl_pct >= be_pct and extras.trail_sl_premium < entry_price:
-        extras.trail_sl_premium = entry_price
-        extras.breakeven_set = True
-        return N2ExitDecision(False, N2ExitLayer.NONE, new_sl_premium=entry_price)
-
-    # Trailing move
-    trig = cfg.get("trail_trigger_pct", 7.0)
-    gap  = cfg.get("trail_gap_pct", 2.5)
-    if pnl_pct >= trig:
-        candidate = extras.peak_premium * (1 - gap / 100.0)
-        if candidate > extras.trail_sl_premium:
-            extras.trail_sl_premium = candidate
-            extras.trail_active = True
-            return N2ExitDecision(False, N2ExitLayer.NONE, new_sl_premium=candidate)
+    if moved_sl is not None:
+        return N2ExitDecision(False, N2ExitLayer.NONE, new_sl_premium=moved_sl)
 
     return N2ExitDecision(False, N2ExitLayer.NONE, "")
 

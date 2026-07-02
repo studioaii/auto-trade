@@ -15,7 +15,8 @@ IST = ZoneInfo("Asia/Kolkata")
 # Strategy risk parameters
 # ---------------------------------------------------------------------------
 
-INITIAL_SL_PCT      = 20.0   # Fixed SL — 20% below entry price
+INITIAL_SL_PCT      = 18.0   # Fixed SL — 18% below entry price (tightened from 20%: cuts dead-loser
+                             # bleed without clipping the deep-dip-then-recover winners that carry the edge)
 
 # Trailing SL (activates at +15%, tightens by 1% per additional 10% gain)
 TRAIL_TRIGGER       = 15.0   # % gain at which trailing activates

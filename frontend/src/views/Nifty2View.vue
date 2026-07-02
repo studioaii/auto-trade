@@ -5,7 +5,7 @@
     <div class="page-header">
       <div>
         <div class="page-title">Nifty 2.0 Dashboard</div>
-        <div class="page-subtitle">Simple Early-Entry · 3 Models · Tight SL/Target · 5-min candles</div>
+        <div class="page-subtitle">VWAP+EMA Breakout (v1 + improvements) · −18% SL / +15% trail · 09:50–14:00 entries · 5-min candles</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
         <span style="font-size:10px;color:var(--text-muted);font-family:var(--font-mono)">
@@ -48,7 +48,7 @@
         <span class="sep">|</span>
         <span>Candles:&nbsp;<b style="color:var(--text-primary)">{{ status.candle_count || 0 }}</b> / {{ status.candles_needed || 22 }}</span>
         <span class="sep">|</span>
-        <span>OR:&nbsp;<b style="color:var(--accent);font-family:var(--font-mono)">{{ orText }}</b></span>
+        <span>Market:&nbsp;<b style="color:var(--accent);font-family:var(--font-mono)">{{ status.market_state || '—' }}</b></span>
         <span class="sep">|</span>
         <span>ATM:&nbsp;<b style="color:var(--accent);font-family:var(--font-mono)">{{ status.instruments?.atm_strike || '—' }}</b></span>
       </div>
@@ -61,41 +61,35 @@
       <div v-if="msg.text" class="msg-box" :class="msg.type">{{ msg.text }}</div>
 
       <div class="strat-note">
-        Models: M1 (VWAP Reclaim) · M2 (Opening-Range Breakout, 09:35–10:15, max 1/day) · M3 (Pullback Continuation)<br>
-        Risk: Hard SL −10% · Target +12% · Breakeven at +3% · Trail activates +4% / 2.5% gap · Time-stop after 6 candles if losing<br>
-        Max 2 trades/day · 09:35–13:30 entries · Force exit 15:15 · Lot size 65 · Block 2nd after hard SL
+        Entry: NIFTY 1.0's VWAP+EMA breakout — close vs VWAP (≥0.15%), EMA20 trending + strong slope, strong body, breakout, 2/3 confirm, RSI band, efficiency, volume surge, not sideways.<br>
+        Improvements: session chop gate (entries blocked for the day once closes flip sides of VWAP ≥6 times) · regime gate that rejects wick-poke / range-top breaks · softened opposite-signal exit (needs 2 consecutive wrong-side-VWAP closes).<br>
+        Risk: Hard SL −18% · Trailing activates +15% / 6%→3% gap · NO fixed target / breakeven / time-stop · Max 2 trades/day · 09:50–14:00 entries · Force exit 15:20 · Lot 65 · Block 2nd after hard SL
       </div>
     </div>
 
-    <!-- ── DAY CONTEXT STRIP ── -->
+    <!-- ── DAY / STRATEGY STRIP ── -->
     <div v-if="status.engine_running" class="mstrip">
-      <div class="mtile">
-        <div class="lbl">OR High</div>
-        <div class="val" style="font-family:var(--font-mono)">
-          {{ status.day_context?.or_high?.toFixed?.(0) ?? '—' }}
-        </div>
-        <div class="sub">09:15–09:30</div>
-      </div>
-      <div class="mtile">
-        <div class="lbl">OR Low</div>
-        <div class="val" style="font-family:var(--font-mono)">
-          {{ status.day_context?.or_low?.toFixed?.(0) ?? '—' }}
-        </div>
-        <div class="sub">{{ status.day_context?.or_locked ? 'locked' : 'forming…' }}</div>
-      </div>
-      <div class="mtile">
-        <div class="lbl">OR Used (ORB)</div>
-        <div class="val" :style="{color: status.day_context?.orb_used ? 'var(--amber)' : 'var(--green)'}">
-          {{ status.day_context?.orb_used ? '✓ used' : '— pending' }}
-        </div>
-        <div class="sub">max 1/day</div>
-      </div>
       <div class="mtile">
         <div class="lbl">Realised P&amp;L</div>
         <div class="val" :style="{color: (status.realised_pnl||0)>=0 ? 'var(--green)' : 'var(--red)'}">
           ₹{{ status.realised_pnl?.toFixed?.(0) || 0 }}
         </div>
         <div class="sub">today</div>
+      </div>
+      <div class="mtile">
+        <div class="lbl">Market State</div>
+        <div class="val" style="font-size:14px">{{ status.market_state || '—' }}</div>
+        <div class="sub">entries only when TRENDING</div>
+      </div>
+      <div class="mtile">
+        <div class="lbl">Entry Window</div>
+        <div class="val" style="font-family:var(--font-mono);font-size:15px">09:50–14:00</div>
+        <div class="sub">session chop gate active</div>
+      </div>
+      <div class="mtile">
+        <div class="lbl">Last Signal</div>
+        <div class="val" style="font-family:var(--font-mono);font-size:13px">{{ status.last_signal || 'NO_SIGNAL' }}</div>
+        <div class="sub">at {{ status.last_candle_time || '—' }}</div>
       </div>
     </div>
 
@@ -145,6 +139,21 @@
       </div>
     </div>
 
+    <!-- ── LIVE CHART ── -->
+    <div class="card chart-card">
+      <div class="chart-title-row">
+        <div class="card-title" style="margin-bottom:0">Live Chart — NIFTY 2.0 · 5-min</div>
+        <div v-if="todayCandles.length" class="chart-legend">
+          <div class="leg"><div class="leg-line" style="background:#f59e0b"></div>VWAP</div>
+          <div class="leg"><div class="leg-line" style="background:#3b82f6"></div>EMA 20</div>
+        </div>
+      </div>
+      <div v-if="!todayCandles.length" class="chart-empty">
+        Start the engine to see the live candlestick chart with VWAP &amp; EMA overlays.
+      </div>
+      <CandlestickChart v-else :candles="todayCandles" :liveCandle="liveCandle" :marker="chartMarker" />
+    </div>
+
     <!-- ── ACTIVE POSITION ── -->
     <div v-if="status.position" class="card" style="border-color:var(--accent)">
       <div class="card-header">
@@ -171,15 +180,14 @@
         <span>MFE: <b>{{ status.position.mfe_pct?.toFixed?.(1) ?? '—' }}%</b></span>
       </div>
       <div class="status-row">
-        <span>Hard SL: <b style="color:var(--red)">{{ status.position.hard_sl_premium?.toFixed?.(2) ?? '—' }}</b></span>
+        <span>Hard SL −18%: <b style="color:var(--red)">{{ status.position.hard_sl_premium?.toFixed?.(2) ?? '—' }}</b></span>
         <span class="sep">|</span>
         <span>Trail SL:
           <b :style="{color: status.position.trail_active ? 'var(--green)' : 'var(--text-muted)'}">
             {{ status.position.trail_sl_premium?.toFixed?.(2) ?? '—' }}
           </b>
+          <span style="color:var(--text-muted)">{{ status.position.trail_active ? '(active)' : '(arms +15%)' }}</span>
         </span>
-        <span class="sep">|</span>
-        <span>BE: <b>{{ status.position.breakeven_set ? '✓ set' : '— pending' }}</b></span>
         <span class="sep">|</span>
         <span>Candles: {{ status.position.candles_since_entry || 0 }}</span>
         <span class="sep">|</span>
@@ -198,15 +206,15 @@
       <table v-else class="trades-table">
         <thead>
           <tr>
-            <th>Time</th><th>Model</th><th>Symbol</th><th>Side</th>
+            <th>Time</th><th>Setup</th><th>Symbol</th><th>Side</th>
             <th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>%</th>
-            <th>MFE</th><th>Exit Layer</th>
+            <th>MFE</th><th>MAE</th><th>Exit</th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="(t, i) in todayTrades" :key="i" :class="parseFloat(t.pnl_rupees) >= 0 ? 'win' : 'loss'">
             <td>{{ t.exit_time }}</td>
-            <td>{{ t.model?.split?.('_')?.[0] || '—' }}</td>
+            <td>{{ (t.model || '').startsWith('V1') ? 'Breakout' : (t.model || '—') }}</td>
             <td>{{ t.option_symbol }}</td>
             <td>{{ t.option_type }}</td>
             <td>{{ t.entry_price }}</td>
@@ -215,7 +223,8 @@
             <td>₹{{ t.pnl_rupees }}</td>
             <td>{{ t.pnl_pct }}%</td>
             <td>{{ t.mfe_pct }}%</td>
-            <td>{{ t.exit_layer }}</td>
+            <td>{{ t.mae_pct }}%</td>
+            <td>{{ t.reason_for_exit || t.exit_layer }}</td>
           </tr>
         </tbody>
       </table>
@@ -232,19 +241,51 @@
       </div>
     </div>
 
+    <!-- ── CANDLE LOG EXPORT ── -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Candle Log Export</div>
+        <div class="candle-log-row">
+          <input type="date" v-model="candleLogDate" />
+          <button class="btn s-btn" style="padding:5px 12px;font-size:11px" @click="downloadCandleLog">⬇ Download CSV</button>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted)">Select a date to download the 5-min candle log (OHLCV + indicators + signal snapshot).</div>
+    </div>
+
+    <!-- ── INSTRUMENTATION (forward-test analysis logs) ── -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Instrumentation</div>
+        <div style="display:flex;gap:8px">
+          <a class="btn s-btn" style="padding:5px 12px;font-size:11px;text-decoration:none" href="/auto-trading/nifty2/instrumentation/post-exit/download">⬇ Post-exit paths</a>
+          <a class="btn s-btn" style="padding:5px 12px;font-size:11px;text-decoration:none" href="/auto-trading/nifty2/instrumentation/shadow/download">⬇ Blocked-signal log</a>
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted)">
+        Post-exit paths = how the option moved for 8 candles after each exit (did we exit early/late?).
+        Blocked-signal log = would-be P&amp;L of every breakout a gate blocked (are the gates skipping winners?).
+        Trade rows also record tick-level MFE &amp; MAE.
+      </div>
+    </div>
+
     <div v-if="status.error" class="msg-box err" style="margin-top:10px">{{ status.error }}</div>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import CandlestickChart from '../components/CandlestickChart.vue'
 
-const status   = reactive({})
-const trades   = ref([])
-const summary  = ref(null)
-const msg      = reactive({ text: '', type: '' })
-const loading  = ref(false)
-let pollTimer  = null
+const status     = reactive({})
+const trades     = ref([])
+const summary    = ref(null)
+const candles    = ref([])
+const liveCandle = ref(null)
+const msg        = reactive({ text: '', type: '' })
+const loading    = ref(false)
+const candleLogDate = ref(new Date().toISOString().slice(0, 10))
+let pollTimer    = null
 
 const downloadHref = '/auto-trading/nifty2/paper-log/download'
 
@@ -256,17 +297,9 @@ const pnlColor = computed(() => {
   return v >= 0 ? 'var(--green)' : 'var(--red)'
 })
 
-const orText = computed(() => {
-  const ctx = status.day_context
-  if (!ctx || ctx.or_high == null || ctx.or_low == null) return '—'
-  return `${ctx.or_high.toFixed?.(0) ?? ctx.or_high} / ${ctx.or_low.toFixed?.(0) ?? ctx.or_low}`
-})
-
 const modelLabel = computed(() => {
   const m = status.position?.model || ''
-  if (m.startsWith('M1')) return 'M1 · VWAP Reclaim'
-  if (m.startsWith('M2')) return 'M2 · ORB'
-  if (m.startsWith('M3')) return 'M3 · Pullback'
+  if (m.startsWith('V1')) return 'VWAP+EMA Breakout'
   return m || '—'
 })
 
@@ -274,6 +307,20 @@ const todayTrades = computed(() => {
   if (!trades.value || trades.value.length === 0) return []
   const today = new Date().toISOString().slice(0, 10)
   return trades.value.filter(t => t.date === today).slice().reverse()
+})
+
+const todayCandles = computed(() => candles.value.filter(c => c.is_today))
+
+const chartMarker = computed(() => {
+  const pos = status.position
+  if (!pos?.entry_time) return null
+  const entryHHMM = pos.entry_time.slice(0, 5)
+  const found = todayCandles.value.find(c => {
+    const d = new Date(c.time * 1000)
+    const t = d.getUTCHours().toString().padStart(2,'0') + ':' + d.getUTCMinutes().toString().padStart(2,'0')
+    return t === entryHHMM
+  })
+  return found ? { time: found.time, type: pos.option_type } : null
 })
 
 async function fetchStatus() {
@@ -298,8 +345,24 @@ async function fetchTrades() {
   } catch (_) {}
 }
 
+async function fetchCandles() {
+  try {
+    const r = await fetch('/auto-trading/nifty2/candles')
+    if (r.ok) {
+      const d = await r.json()
+      candles.value    = d.candles     || []
+      liveCandle.value = d.live_candle || null
+    }
+  } catch (_) {}
+}
+
 async function refreshAll() {
-  await Promise.all([fetchStatus(), fetchTrades()])
+  await Promise.all([fetchStatus(), fetchTrades(), fetchCandles()])
+}
+
+function downloadCandleLog() {
+  if (!candleLogDate.value) { alert('Please select a date.'); return }
+  window.location.href = '/auto-trading/nifty2/candle-log/download/' + candleLogDate.value
 }
 
 async function startEngine() {

@@ -1,14 +1,31 @@
 """
-NIFTY 2.0 — Simple early-entry strategy.
+NIFTY 2.0 — strategy.
 
-Three numeric, named entry models that catch moves earlier than v1:
+This is NIFTY 1.0's VWAP+EMA breakout (the wide-tail trend-rider) PLUS the
+improvements from the June-2026 NIFTY-1.0 log analysis:
 
-  M1 — VWAP Reclaim       (catches turning points; signal candle crosses VWAP)
-  M2 — Opening-Range Break (catches the first trend of the day, 09:35–10:15)
-  M3 — Pullback Continuation (catches the second leg of a fresh trend)
+  • Base entry  — v1's 9-condition CE/PE breakout (close vs VWAP, EMA trend +
+    strong slope, strong body, breakout vs prior high/low, 2-of-3 confirmation,
+    RSI band, efficiency, volume surge, no spike, not SIDEWAYS).
+  • Regime gate — on top of the base signal, reject the range-top wick-poke
+    breakouts that fail immediately:
+      (1) close-confirmed breakout: the CLOSE (not just the high/low) must clear
+          the prior swing by a margin — kills single-wick pokes (06-16/06-17);
+      (2) VWAP-crossing chop guard: too many VWAP crossings recently = ranging;
+      (3) session-cumulative chop gate (added 2026-07-02): once today's closes
+          have flipped sides of VWAP ≥ session_max_vwap_crossings times, block
+          entries for the rest of the day — chop-day entries ran 22% WR in the
+          n=35 v1 study. (The 11:00 morning wall was removed the same day; its
+          forward test blocked only winners.)
+  • Softened opposite-signal exit detector (the 2-consecutive-close confirmation
+    is counted in the engine; this module exposes the single-candle detector).
 
-Universal filters (cheap, few) and tight RSI bands block exhaustion entries.
+`evaluate_signal` returns an N2Setup carrying BOTH the final `signal` (after the
+regime gate) and the raw `base_signal` (what v1 alone would have done) so the
+engine can shadow-log every setup a gate blocked.
+
 Pure functions — no I/O, no state mutation. The engine calls per closed candle.
+Per-instrument thresholds are read from cfg (INSTRUMENT_CONFIG["NIFTY_2"]).
 """
 from __future__ import annotations
 
@@ -18,11 +35,18 @@ from enum import Enum
 from typing import Optional
 
 from services.trading_state import Candle
-from services.indicators import candle_body_pct
+from services.indicators import (
+    candle_body_pct,
+    ema_trending_up, ema_trending_down,
+    ema_slope_strong_up, ema_slope_strong_down,
+    is_strong_bullish, is_strong_bearish,
+    is_spike_candle, has_volume_surge,
+    is_far_enough_from_vwap, multi_candle_confirmation,
+)
 
 
 # ---------------------------------------------------------------------------
-# Enums / setup descriptor
+# Enums / setup descriptor (symbol names kept for engine-import compatibility)
 # ---------------------------------------------------------------------------
 
 class N2Signal(str, Enum):
@@ -33,6 +57,8 @@ class N2Signal(str, Enum):
 
 class N2Model(str, Enum):
     NONE = "NONE"
+    V1   = "V1_BREAKOUT"     # the only model now — v1 VWAP+EMA breakout
+    # legacy names kept so any external reference still resolves
     M1   = "M1_VWAP_RECLAIM"
     M2   = "M2_ORB"
     M3   = "M3_PULLBACK"
@@ -41,25 +67,30 @@ class N2Model(str, Enum):
 @dataclass
 class N2Setup:
     """Outcome of evaluating the strategy on the latest candle."""
-    signal: N2Signal = N2Signal.NO_SIGNAL
+    signal: N2Signal = N2Signal.NO_SIGNAL          # final decision (after regime gate)
     model:  N2Model  = N2Model.NONE
     reason: str = ""
     skip_reason: str = ""
+    base_signal: N2Signal = N2Signal.NO_SIGNAL     # what v1 alone would have fired
 
 
 @dataclass
 class N2DayContext:
-    """Per-day runtime context — mutated by the engine, read by strategy fns."""
+    """Per-day runtime context — mutated by the engine, read by strategy fns.
+
+    Retained for engine compatibility (opening-range tracking is still computed
+    and logged as informational context even though the breakout strategy does
+    not gate on it)."""
     or_high: Optional[float] = None
     or_low:  Optional[float] = None
-    or_locked: bool = False                 # True once OR window has elapsed
+    or_locked: bool = False
     consecutive_up_candles: int = 0
     consecutive_dn_candles: int = 0
-    orb_used: bool = False                  # True once we've taken our 1 ORB trade
+    orb_used: bool = False
 
 
 # ---------------------------------------------------------------------------
-# OR computation + per-candle leg tracker
+# OR computation + per-candle leg tracker (kept for engine compatibility)
 # ---------------------------------------------------------------------------
 
 def compute_opening_range(
@@ -91,224 +122,184 @@ def update_consecutive_legs(ctx: N2DayContext, candle: Candle) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Universal entry gates — return list of skip reasons (empty = clear)
+# Regime-stability gate (Tier-B improvement #1, mechanism half)
 # ---------------------------------------------------------------------------
 
-def _universal_skips(
-    candle: Candle,
-    indicators: dict,
-    ctx: N2DayContext,
-    cfg: dict,
-    now: datetime,
-) -> list[str]:
-    reasons: list[str] = []
-    body = candle_body_pct(candle)
-    rng_pct = (candle.high - candle.low) / candle.close * 100.0 if candle.close > 0 else 0
-    vwap = indicators.get("vwap") or 0.0
-
-    # spike (range >0.85% of price = volatile bar)
-    if rng_pct > 0.85:
-        reasons.append(f"spike {rng_pct:.2f}%")
-
-    if body < cfg.get("body_min_pct", 55.0):
-        reasons.append(f"body {body:.0f}% < {cfg.get('body_min_pct', 55):.0f}")
-
-    if vwap > 0:
-        dist = abs(candle.close - vwap) / vwap * 100.0
-        if dist < cfg.get("vwap_dist_min_pct", 0.10):
-            reasons.append(f"vwap dist {dist:.2f}% < min")
-        elif dist > cfg.get("vwap_dist_max_pct", 0.40):
-            reasons.append(f"vwap dist {dist:.2f}% > max")
-    else:
-        reasons.append("no VWAP")
-
-    # 4+ same-dir legs
-    max_legs = cfg.get("max_consecutive_same_dir", 4)
-    if ctx.consecutive_up_candles >= max_legs:
-        reasons.append(f"{ctx.consecutive_up_candles} legs up")
-    if ctx.consecutive_dn_candles >= max_legs:
-        reasons.append(f"{ctx.consecutive_dn_candles} legs down")
-
-    # time window
-    win_start = time(*cfg.get("entry_window_start", (9, 35)))
-    win_end   = time(*cfg.get("entry_window_end",   (13, 30)))
-    if now.time() < win_start:
-        reasons.append(f"before {win_start}")
-    elif now.time() >= win_end:
-        reasons.append(f"past {win_end}")
-
-    return reasons
+def _vwap_crossings(candles: list[Candle], vwap: float, lookback: int) -> int:
+    """Count VWAP side-changes across the last `lookback` candle closes."""
+    if vwap <= 0 or len(candles) < 2:
+        return 0
+    closes = [c.close for c in candles[-lookback:]]
+    return sum(
+        1 for i in range(1, len(closes))
+        if (closes[i - 1] > vwap) != (closes[i] > vwap)
+    )
 
 
-def _rsi_in_band(rsi: float, side: N2Signal, cfg: dict) -> bool:
-    if side == N2Signal.BUY_CE:
-        return cfg.get("rsi_min_ce", 50.0) <= rsi <= cfg.get("rsi_max_ce", 67.0)
-    if side == N2Signal.BUY_PE:
-        return cfg.get("rsi_min_pe", 33.0) <= rsi <= cfg.get("rsi_max_pe", 50.0)
-    return False
+def _session_vwap_crossings(candles: list[Candle]) -> int:
+    """Count VWAP side-changes across ALL of today's session candle closes.
 
-
-# ---------------------------------------------------------------------------
-# Model 1 — VWAP Reclaim
-# ---------------------------------------------------------------------------
-
-def evaluate_m1_vwap_reclaim(
-    candles: list[Candle],
-    indicators: dict,
-    cfg: dict,
-    now: datetime,
-) -> Optional[N2Setup]:
-    """Previous candle on one side of VWAP, current closes across with body confirmation."""
-    if len(candles) < 2:
-        return None
-    cur = candles[-1]
-    prev = candles[-2]
-    vwap = indicators.get("vwap") or 0.0
-    rsi  = indicators.get("rsi14") or 50.0
-    if vwap <= 0:
-        return None
-
-    # CE reclaim: prev below VWAP, current closes above + bullish body
-    if prev.close < vwap and cur.close > vwap and cur.close > cur.open:
-        if _rsi_in_band(rsi, N2Signal.BUY_CE, cfg):
-            return N2Setup(
-                signal=N2Signal.BUY_CE,
-                model=N2Model.M1,
-                reason=f"M1 | reclaim VWAP={vwap:.0f} prev<{vwap:.0f} cur>{vwap:.0f} | RSI={rsi:.0f}",
-            )
-
-    # PE reclaim: prev above VWAP, current closes below + bearish body
-    if prev.close > vwap and cur.close < vwap and cur.close < cur.open:
-        if _rsi_in_band(rsi, N2Signal.BUY_PE, cfg):
-            return N2Setup(
-                signal=N2Signal.BUY_PE,
-                model=N2Model.M1,
-                reason=f"M1 | break VWAP={vwap:.0f} prev>{vwap:.0f} cur<{vwap:.0f} | RSI={rsi:.0f}",
-            )
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Model 2 — Opening-Range Breakout
-# ---------------------------------------------------------------------------
-
-def evaluate_m2_orb(
-    candles: list[Candle],
-    indicators: dict,
-    ctx: N2DayContext,
-    cfg: dict,
-    now: datetime,
-) -> Optional[N2Setup]:
-    """First-trend breakout from the OR (locked at OR-window-end)."""
-    if ctx.orb_used:
-        return None
-    if not ctx.or_locked or ctx.or_high is None or ctx.or_low is None:
-        return None
-    orb_start = time(*cfg.get("orb_window_start", (9, 35)))
-    orb_end   = time(*cfg.get("orb_window_end",   (10, 15)))
-    if not (orb_start <= now.time() <= orb_end):
-        return None
+    Recomputes the running intraday VWAP at each candle (cumulative typical
+    price × volume, session candles only — preloaded previous-day seed candles
+    are excluded by the date filter) so every close is compared against the
+    VWAP as it stood at that moment. This matches the candle-log data the
+    gate threshold was derived from; comparing old closes against the *latest*
+    VWAP (as `_vwap_crossings` does for its short window) would drift on a
+    session-length window."""
     if not candles:
-        return None
-    cur  = candles[-1]
-    vwap = indicators.get("vwap") or 0.0
-    rsi  = indicators.get("rsi14") or 50.0
-    if vwap <= 0:
-        return None
-    min_dist = cfg.get("orb_min_vwap_dist_pct", 0.15)
-    dist = abs(cur.close - vwap) / vwap * 100.0
+        return 0
+    today = candles[-1].timestamp.date()
+    session = [c for c in candles if c.timestamp.date() == today]
+    if len(session) < 2:
+        return 0
+    cum_pv = 0.0
+    cum_v = 0
+    sides: list[bool] = []
+    for c in session:
+        typical = (c.high + c.low + c.close) / 3.0
+        cum_pv += typical * c.volume
+        cum_v += c.volume
+        vwap = cum_pv / cum_v if cum_v > 0 else c.close
+        sides.append(c.close > vwap)
+    return sum(1 for i in range(1, len(sides)) if sides[i] != sides[i - 1])
 
-    if dist < min_dist:
-        return None
 
-    # CE: bullish breakout above OR-high AND close > VWAP
-    if cur.close > ctx.or_high and cur.close > vwap and cur.close > cur.open:
-        if _rsi_in_band(rsi, N2Signal.BUY_CE, cfg):
-            return N2Setup(
-                signal=N2Signal.BUY_CE,
-                model=N2Model.M2,
-                reason=f"M2 | break ORH={ctx.or_high:.0f} close={cur.close:.0f} | RSI={rsi:.0f}",
-            )
-    # PE: bearish break below OR-low AND close < VWAP
-    if cur.close < ctx.or_low and cur.close < vwap and cur.close < cur.open:
-        if _rsi_in_band(rsi, N2Signal.BUY_PE, cfg):
-            return N2Setup(
-                signal=N2Signal.BUY_PE,
-                model=N2Model.M2,
-                reason=f"M2 | break ORL={ctx.or_low:.0f} close={cur.close:.0f} | RSI={rsi:.0f}",
-            )
-    return None
+def _regime_block_reason(
+    candles: list[Candle],
+    side: N2Signal,
+    vwap: float,
+    cfg: dict,
+) -> str:
+    """Return a non-empty reason if the regime gate blocks this breakout, else ''."""
+    cur = candles[-1]
+
+    # (1) close-confirmed breakout — the CLOSE must clear the prior swing by a
+    #     margin. v1's base only required high>prev.high (a single wick poke
+    #     qualifies); requiring a confirming close kills the range-top pokes.
+    if cfg.get("require_close_breakout", True):
+        lookback = int(cfg.get("breakout_lookback", 3))
+        margin   = float(cfg.get("breakout_margin_pct", 0.05)) / 100.0
+        prior = candles[-(lookback + 1):-1]
+        if prior:
+            if side == N2Signal.BUY_CE:
+                swing_high = max(c.high for c in prior)
+                if cur.close <= swing_high * (1 + margin):
+                    return f"regime: close {cur.close:.1f} did not clear swing-high {swing_high:.1f} by {margin*100:.2f}%"
+            else:
+                swing_low = min(c.low for c in prior)
+                if cur.close >= swing_low * (1 - margin):
+                    return f"regime: close {cur.close:.1f} did not clear swing-low {swing_low:.1f} by {margin*100:.2f}%"
+
+    # (2) VWAP-crossing chop guard — straddling VWAP = ranging, not trending.
+    max_cross = int(cfg.get("regime_max_vwap_crossings", 2))
+    lb        = int(cfg.get("regime_vwap_lookback", 5))
+    crossings = _vwap_crossings(candles, vwap, lb)
+    if crossings >= max_cross:
+        return f"regime: {crossings} VWAP crossings in last {lb} (chop)"
+
+    # (3) Session-cumulative chop gate — too many VWAP flips since the open
+    #     marks a ranging DAY, not just a ranging patch. In the n=35 v1 study
+    #     entries taken with ≥6 session crossings ran 22% WR (−₹9,529 net).
+    #     Crossings only accumulate, so once tripped this kills the day.
+    max_sess = int(cfg.get("session_max_vwap_crossings", 0))
+    if max_sess > 0:
+        sess_cross = _session_vwap_crossings(candles)
+        if sess_cross >= max_sess:
+            return f"regime: {sess_cross} VWAP crossings this session (chop day)"
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
-# Model 3 — Pullback Continuation
+# Base entry — v1 VWAP+EMA breakout
 # ---------------------------------------------------------------------------
 
-def evaluate_m3_pullback(
+def _base_breakout(
     candles: list[Candle],
     indicators: dict,
     cfg: dict,
-    now: datetime,
-) -> Optional[N2Setup]:
+) -> tuple[N2Signal, str, str]:
     """
-    Look 2…N candles back for a strong signal candle (body ≥ 60%), then verify
-    the pullback held VWAP side and the current candle resumes direction.
+    v1's exact breakout logic. Returns (signal, reason, skip_reason).
+    signal is NO_SIGNAL when no breakout; skip_reason explains common-filter blocks.
     """
-    if len(candles) < 5:
-        return None
-    cur  = candles[-1]
-    prev = candles[-2]
-    vwap = indicators.get("vwap") or 0.0
-    rsi  = indicators.get("rsi14") or 50.0
-    if vwap <= 0:
-        return None
-    body_min = cfg.get("pullback_signal_body_min", 60.0)
-    k_min    = cfg.get("pullback_lookback_min", 2)
-    k_max    = cfg.get("pullback_lookback_max", 4)
+    if len(candles) < 3:
+        return N2Signal.NO_SIGNAL, "", "insufficient candles"
 
-    for k in range(k_min, k_max + 1):
-        if len(candles) < k + 1:
-            break
-        sig = candles[-k - 1]
-        if candle_body_pct(sig) < body_min:
-            continue
-        pull = candles[-k:-1]
-        if not pull:
-            continue
+    market_state = indicators.get("market_state", "UNKNOWN")
+    if market_state == "SIDEWAYS":
+        return N2Signal.NO_SIGNAL, "", "market is sideways"
 
-        # CE: signal bullish, pullback closes held above VWAP, current resumes
-        if sig.close > sig.open:
-            if any(c.close < vwap for c in pull):
-                continue
-            if cur.close <= prev.high:
-                continue
-            if cur.close <= cur.open:
-                continue
-            if cur.close <= max(c.high for c in pull):
-                continue
-            if _rsi_in_band(rsi, N2Signal.BUY_CE, cfg):
-                return N2Setup(
-                    signal=N2Signal.BUY_CE,
-                    model=N2Model.M3,
-                    reason=f"M3 | sig@-{k} body={candle_body_pct(sig):.0f}% | break above pull",
-                )
-        # PE: signal bearish, pullback held below VWAP, current resumes
-        if sig.close < sig.open:
-            if any(c.close > vwap for c in pull):
-                continue
-            if cur.close >= prev.low:
-                continue
-            if cur.close >= cur.open:
-                continue
-            if cur.close >= min(c.low for c in pull):
-                continue
-            if _rsi_in_band(rsi, N2Signal.BUY_PE, cfg):
-                return N2Setup(
-                    signal=N2Signal.BUY_PE,
-                    model=N2Model.M3,
-                    reason=f"M3 | sig@-{k} body={candle_body_pct(sig):.0f}% | break below pull",
-                )
-    return None
+    ema20        = indicators.get("ema20")
+    ema20_series = indicators.get("ema20_series", [])
+    vwap         = indicators.get("vwap") or 0.0
+    rsi14        = indicators.get("rsi14")
+    efficiency   = indicators.get("efficiency_ratio", 0.0)
+    volume_surge = indicators.get("volume_surge", True)
+
+    if ema20 is None:
+        return N2Signal.NO_SIGNAL, "", "EMA20 not ready"
+
+    current = candles[-1]
+    prev    = candles[-2]
+
+    if is_spike_candle(current):
+        rng = (current.high - current.low) / current.close * 100 if current.close else 0
+        return N2Signal.NO_SIGNAL, "", f"spike candle ({rng:.2f}% range)"
+
+    rsi_min_ce        = cfg.get("rsi_min_ce", 50)
+    rsi_max_ce        = cfg.get("rsi_max_ce", 100)
+    rsi_min_pe        = cfg.get("rsi_min_pe", 0)
+    rsi_max_pe        = cfg.get("rsi_max_pe", 50)
+    vwap_dist_min     = cfg.get("vwap_dist_min_pct", 0.15)
+    efficiency_min_ce = cfg.get("efficiency_min_ce", 0.45)
+    efficiency_min_pe = cfg.get("efficiency_min_pe", 0.45)
+
+    # ── Common filters ────────────────────────────────────────────────
+    if not volume_surge:
+        return N2Signal.NO_SIGNAL, "", "low volume — no participation"
+    if not is_far_enough_from_vwap(current.close, vwap, min_pct=vwap_dist_min):
+        return N2Signal.NO_SIGNAL, "", "too close to VWAP"
+
+    # ── CE breakout ───────────────────────────────────────────────────
+    ce_conditions = {
+        "close > VWAP":          current.close > vwap,
+        "EMA20 trending up":     ema_trending_up(ema20_series),
+        "EMA20 slope strong":    ema_slope_strong_up(ema20_series),
+        "strong bullish candle": is_strong_bullish(current),
+        "breakout high":         current.high > prev.high,
+        "2/3 candles bullish":   multi_candle_confirmation(candles, "bullish"),
+        "RSI in range":          rsi14 is not None and rsi_min_ce <= rsi14 <= rsi_max_ce,
+        "efficiency":            efficiency >= efficiency_min_ce,
+    }
+    if all(ce_conditions.values()):
+        reason = (
+            f"close={current.close:.1f} > VWAP={vwap:.1f} | "
+            f"EMA20={ema20:.1f} up | RSI={rsi14:.1f} | "
+            f"breakout: high {current.high:.1f} > {prev.high:.1f}"
+        )
+        return N2Signal.BUY_CE, reason, ""
+
+    # ── PE breakout ───────────────────────────────────────────────────
+    pe_conditions = {
+        "close < VWAP":          current.close < vwap,
+        "EMA20 trending down":   ema_trending_down(ema20_series),
+        "EMA20 slope strong":    ema_slope_strong_down(ema20_series),
+        "strong bearish candle": is_strong_bearish(current),
+        "breakout low":          current.low < prev.low,
+        "2/3 candles bearish":   multi_candle_confirmation(candles, "bearish"),
+        "RSI in range":          rsi14 is not None and rsi_min_pe <= rsi14 <= rsi_max_pe,
+        "efficiency":            efficiency >= efficiency_min_pe,
+    }
+    if all(pe_conditions.values()):
+        reason = (
+            f"close={current.close:.1f} < VWAP={vwap:.1f} | "
+            f"EMA20={ema20:.1f} down | RSI={rsi14:.1f} | "
+            f"breakout: low {current.low:.1f} < {prev.low:.1f}"
+        )
+        return N2Signal.BUY_PE, reason, ""
+
+    return N2Signal.NO_SIGNAL, "", "no breakout"
 
 
 # ---------------------------------------------------------------------------
@@ -322,24 +313,62 @@ def evaluate_signal(
     cfg: dict,
     now: datetime,
 ) -> N2Setup:
-    """Combine universal filters and the 3 models. Returns N2Setup."""
+    """
+    Evaluate the base v1 breakout, then apply the regime-stability gate.
+    Returns an N2Setup whose `base_signal` records what v1 alone would have
+    fired (for shadow logging) and whose `signal` is the final decision.
+    """
     if not candles:
         return N2Setup(skip_reason="no candles")
-    cur = candles[-1]
 
-    # Universal skips
-    skips = _universal_skips(cur, indicators, ctx, cfg, now)
-    if skips:
-        return N2Setup(skip_reason="; ".join(skips))
+    base, reason, skip = _base_breakout(candles, indicators, cfg)
+    if base == N2Signal.NO_SIGNAL:
+        return N2Setup(skip_reason=skip)
 
-    # Try models in order — M1 (fastest signal), M2 (ORB only window), M3 (continuation)
-    for model_fn in (
-        lambda: evaluate_m1_vwap_reclaim(candles, indicators, cfg, now),
-        lambda: evaluate_m2_orb(candles, indicators, ctx, cfg, now),
-        lambda: evaluate_m3_pullback(candles, indicators, cfg, now),
-    ):
-        setup = model_fn()
-        if setup is not None:
-            return setup
+    # A genuine v1 breakout fired — run it through the regime gate.
+    vwap = indicators.get("vwap") or 0.0
+    block = _regime_block_reason(candles, base, vwap, cfg)
+    if block:
+        return N2Setup(signal=N2Signal.NO_SIGNAL, base_signal=base,
+                       skip_reason=block, reason=reason)
 
-    return N2Setup(skip_reason="no model matched")
+    return N2Setup(signal=base, base_signal=base, model=N2Model.V1, reason=reason)
+
+
+# ---------------------------------------------------------------------------
+# Opposite-signal exit detector (single-candle; engine adds the 2-close confirm)
+# ---------------------------------------------------------------------------
+
+def detect_opposite_signal_v1(
+    candles: list[Candle],
+    current_option_type: str,   # "CE" or "PE"
+    vwap: float,
+    ema20_series: list,
+    market_state: str,
+) -> bool:
+    """
+    True if a breakout OPPOSITE to the open position has formed on this candle.
+    Mirrors v1's detect_opposite_signal. The engine only acts on this once the
+    price has also closed on the wrong side of VWAP for N consecutive candles
+    (opposite_exit_confirm_closes), which is the softened-exit improvement.
+    """
+    if len(candles) < 2 or market_state == "SIDEWAYS":
+        return False
+
+    current = candles[-1]
+    prev = candles[-2]
+
+    if current_option_type == "CE":
+        return (
+            current.close < vwap
+            and ema_trending_down(ema20_series)
+            and is_strong_bearish(current)
+            and current.low < prev.low
+        )
+    else:
+        return (
+            current.close > vwap
+            and ema_trending_up(ema20_series)
+            and is_strong_bullish(current)
+            and current.high > prev.high
+        )

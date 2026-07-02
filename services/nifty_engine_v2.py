@@ -6,8 +6,10 @@ Independent state, strategy, and exits. Shares only:
   • The MarketDataService WebSocket singleton (multi-route routing)
 
 Same NIFTY underlying tokens as v1, same ATM strike picking, but a wholly
-separate position/state machine. Strategy: NIFTY 2.0 simple 3-model entry.
-Risk: tight SL/target/trail. Always PAPER mode.
+separate position/state machine. Strategy: NIFTY 1.0's VWAP+EMA breakout plus
+the June-2026 analysis improvements (11:00 morning wait + regime gate, softened
+2-close opposite-signal exit, −18% SL / +15% trailing, full instrumentation).
+Always PAPER mode.
 """
 from __future__ import annotations
 
@@ -35,6 +37,7 @@ from services.indicators import (
 from services.nifty_strategy_v2 import (
     N2Signal, N2Model, N2Setup, N2DayContext,
     evaluate_signal, update_consecutive_legs, compute_opening_range,
+    detect_opposite_signal_v1,
 )
 from services.nifty_risk_manager_v2 import (
     N2PositionExtras, N2ExitDecision, N2ExitLayer,
@@ -44,6 +47,7 @@ from services.nifty_risk_manager_v2 import (
 from services.nifty_paper_trade_v2 import log_trade_n2
 from services.nifty_candle_logger_v2 import log_candle_n2
 from services.nifty_entry_logger_v2 import log_attempt_n2
+from services.nifty_instrumentation_v2 import log_post_exit_n2, log_shadow_signal_n2
 from services.market_data import (
     InstrumentSubscription, get_market_data_service,
 )
@@ -69,6 +73,36 @@ class N2DailyState:
     first_trade_was_sl:  bool = False
     last_exit_candle_idx: int = -1
     day_ctx: N2DayContext = field(default_factory=N2DayContext)
+
+
+@dataclass
+class OptionPathTracker:
+    """Tracks an option's LTP path for instrumentation.
+
+    POST_EXIT — the just-closed trade's option, for `post_exit_track_candles`
+                candles after exit (did we exit too early/late?).
+    SHADOW    — a genuine breakout signal a gate BLOCKED, tracked until the
+                15:20 force-exit (would the blocked signal have won?).
+    """
+    kind:           str            # "POST_EXIT" | "SHADOW"
+    tradingsymbol:  str
+    option_type:    str
+    strike:         int
+    ref_price:      float          # POST_EXIT: exit price | SHADOW: would-be entry
+    start_time:     datetime
+    reason:         str
+    max_ltp:        float
+    min_ltp:        float
+    last_ltp:       float
+    candles_left:   int = 0        # POST_EXIT only
+    candles_done:   int = 0
+    until_force_exit: bool = False  # SHADOW: track until force-exit time
+    trade_number:   int = 0         # POST_EXIT
+    entry_price:    float = 0.0     # POST_EXIT
+    signal:         str = ""        # SHADOW
+    spot:           float = 0.0     # SHADOW
+    vwap:           float = 0.0     # SHADOW
+    rsi14:          float = 0.0     # SHADOW
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +137,10 @@ class NiftyEngineV2:
 
         self._daily = N2DailyState()
         self._position_extras: Optional[N2PositionExtras] = None
+
+        # Instrumentation: post-exit + shadow (blocked-signal) option-path trackers.
+        self._path_trackers: list[OptionPathTracker] = []
+        self._tracker_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # State accessors
@@ -233,6 +271,7 @@ class NiftyEngineV2:
             if state.position is not None:
                 logger.info("N2 stopping — closing open position first")
                 self._execute_exit(layer=N2ExitLayer.MANUAL_STOP, reason="MANUAL_STOP")
+            self._flush_path_trackers()
             self._market_data.unregister_instrument(INSTRUMENT_NAME)
         except Exception as e:
             logger.error("N2 stop encountered error: %s", e)
@@ -311,7 +350,7 @@ class NiftyEngineV2:
 
         return {
             "instrument":         INSTRUMENT_NAME,
-            "strategy":           "NIFTY_2_SIMPLE_EARLY_ENTRY_V1",
+            "strategy":           "NIFTY_2_VWAP_EMA_BREAKOUT_V1PLUS",
             "mode":               state.trading_mode,
             "engine_running":     state.engine_running,
             "trades_today":       self._daily.trades_today,
@@ -524,6 +563,9 @@ class NiftyEngineV2:
         atm_strike = int(self._ce_instrument["strike"]) if self._ce_instrument else None
         now = datetime.now(IST)
 
+        # Instrumentation: advance post-exit + shadow option-path trackers (1 REST/candle).
+        self._update_path_trackers(now)
+
         # Always-on candle log row
         signal_value = "NO_SIGNAL"
         model_value  = N2Model.NONE.value
@@ -533,7 +575,7 @@ class NiftyEngineV2:
 
         # If we have an open position, manage exits and return
         if state.position is not None:
-            self._check_exits_on_candle(state)
+            self._check_exits_on_candle(state, indicators)
             log_candle_n2(
                 candle=candle, indicators=indicators, state=state,
                 atm_strike=atm_strike,
@@ -552,30 +594,41 @@ class NiftyEngineV2:
             last_exit_candle_idx=self._daily.last_exit_candle_idx,
             current_candle_idx=len(state.candles) - 1,
         )
-        allowed, reason = can_enter_trade_n2(gate, self._cfg, now)
+        allowed, gate_reason = can_enter_trade_n2(gate, self._cfg, now)
 
-        if allowed and indicators.get("enough_data"):
-            setup = evaluate_signal(state.candles, indicators, ctx, self._cfg, now)
-            if setup.signal != N2Signal.NO_SIGNAL:
-                signal_value = setup.signal.value
-                model_value  = setup.model.value
-                self._execute_entry(setup, indicators, now)
+        # Always evaluate the signal (pure/cheap) so we can shadow-log any
+        # genuine breakout a gate blocked, even when the entry gate denies.
+        setup = (evaluate_signal(state.candles, indicators, ctx, self._cfg, now)
+                 if indicators.get("enough_data") else None)
+
+        if setup is not None and setup.signal != N2Signal.NO_SIGNAL and allowed:
+            signal_value = setup.signal.value
+            model_value  = setup.model.value
+            self._execute_entry(setup, indicators, now)
+        else:
+            base = setup.base_signal if setup else N2Signal.NO_SIGNAL
+            if base != N2Signal.NO_SIGNAL:
+                # A real v1 breakout fired but was blocked — by the regime gate
+                # (setup.signal cleared) or by the entry gate (e.g. before 11:00).
+                block_reason = setup.skip_reason if setup.signal == N2Signal.NO_SIGNAL else gate_reason
+                self._register_shadow(base, indicators, now, block_reason)
+                skip_value = block_reason
             else:
-                skip_value = setup.skip_reason
-                self._log_attempt(
-                    when=now, model="ANY", signal="NO_SIGNAL",
-                    outcome="SKIPPED",
-                    spot=state.nifty_spot, atm_strike=atm_strike or 0,
-                    option_ltp=0.0,
-                    vwap=indicators.get("vwap") or 0.0,
-                    rsi14=indicators.get("rsi14") or 0.0,
-                    body_pct=candle_body_pct(candle),
-                    or_high=ctx.or_high or 0.0, or_low=ctx.or_low or 0.0,
-                    skip_reasons=[skip_value] if skip_value else [],
-                    reason="",
-                )
-        elif not allowed:
-            skip_value = reason
+                skip_value = (setup.skip_reason if setup else "not enough data") or (
+                    gate_reason if not allowed else "")
+            self._log_attempt(
+                when=now, model="ANY",
+                signal=(base.value if base != N2Signal.NO_SIGNAL else "NO_SIGNAL"),
+                outcome="SKIPPED",
+                spot=state.nifty_spot, atm_strike=atm_strike or 0,
+                option_ltp=0.0,
+                vwap=indicators.get("vwap") or 0.0,
+                rsi14=indicators.get("rsi14") or 0.0,
+                body_pct=candle_body_pct(candle),
+                or_high=ctx.or_high or 0.0, or_low=ctx.or_low or 0.0,
+                skip_reasons=[skip_value] if skip_value else [],
+                reason="",
+            )
 
         log_candle_n2(
             candle=candle, indicators=indicators, state=state,
@@ -665,9 +718,9 @@ class NiftyEngineV2:
 
         atm_strike = int(instrument["strike"])
         logger.info(
-            "[N2 PAPER] ENTRY | %s | %s @ %.2f qty=%d | hard_sl=%.2f(−%.1f%%) target=%.2f | %s",
+            "[N2 PAPER] ENTRY | %s | %s @ %.2f qty=%d | hard_sl=%.2f(−%.1f%%) trail@+%.0f%% | %s",
             instrument["tradingsymbol"], option_type, ltp, qty,
-            hard_sl, sl_pct, target_px, setup.reason,
+            hard_sl, sl_pct, self._cfg.get("trail_trigger_pct", 15.0), setup.reason,
         )
 
         self._log_attempt(
@@ -687,7 +740,7 @@ class NiftyEngineV2:
     # Exit evaluation per candle / per tick
     # ------------------------------------------------------------------
 
-    def _check_exits_on_candle(self, state: TradingState) -> None:
+    def _check_exits_on_candle(self, state: TradingState, indicators: dict) -> None:
         if state.position is None or self._position_extras is None:
             return
         decision = evaluate_exit_n2(
@@ -703,6 +756,38 @@ class NiftyEngineV2:
                     raw.position.trailing_sl_price = decision.new_sl_premium
         if decision.should_exit:
             self._execute_exit(layer=decision.layer, reason=decision.reason)
+            return
+
+        # Softened opposite-signal exit (candle-close only): fire only after the
+        # price has closed on the wrong side of VWAP for N consecutive candles
+        # AND a reverse breakout has formed (kills single-bar VWAP headfakes).
+        self._maybe_opposite_exit(state, indicators)
+
+    def _maybe_opposite_exit(self, state: TradingState, indicators: dict) -> None:
+        extras = self._position_extras
+        pos = state.position
+        if extras is None or pos is None:
+            return
+        confirm = int(self._cfg.get("opposite_exit_confirm_closes", 2))
+        if confirm <= 0:
+            return
+        vwap = indicators.get("vwap") or 0.0
+        if vwap <= 0 or not state.candles:
+            return
+        cur = state.candles[-1]
+        wrong_side = (cur.close < vwap) if pos.option_type == "CE" else (cur.close > vwap)
+        extras.consec_wrong_side_vwap = (extras.consec_wrong_side_vwap + 1) if wrong_side else 0
+        if extras.consec_wrong_side_vwap < confirm:
+            return
+        if detect_opposite_signal_v1(
+            state.candles, pos.option_type, vwap,
+            indicators.get("ema20_series", []),
+            indicators.get("market_state", "UNKNOWN"),
+        ):
+            self._execute_exit(
+                layer=N2ExitLayer.OPPOSITE_SIGNAL,
+                reason=f"OPPOSITE_SIGNAL ({extras.consec_wrong_side_vwap} wrong-side VWAP closes)",
+            )
 
     def _check_exits_on_tick(self) -> None:
         state = self._get_state()
@@ -713,6 +798,7 @@ class NiftyEngineV2:
             current_price=state.position.current_price or state.position.entry_price,
             extras=self._position_extras,
             cfg=self._cfg,
+            allow_sl_moves=False,   # ticks fire target/SL fast; breakeven/trail arm only on candle close
         )
         if not decision.should_exit and decision.new_sl_premium is not None:
             with self._get_lock():
@@ -745,7 +831,7 @@ class NiftyEngineV2:
         self._daily.last_exit_candle_idx = max(0, len(self._get_state().candles) - 1)
 
         if self._daily.trades_today == 1:
-            self._daily.first_trade_was_sl = (layer == N2ExitLayer.HARD_SL)
+            self._daily.first_trade_was_sl = (layer == N2ExitLayer.STOPLOSS_HIT)
 
         self._update_state(
             exit_reason=reason,
@@ -771,8 +857,9 @@ class NiftyEngineV2:
             ema20_entry=position.ema20_entry or 0.0,
             rsi14_entry=position.rsi14_entry or 0.0,
             hard_sl_premium=extras.hard_sl_premium if extras else 0.0,
-            sl_pct=self._cfg.get("sl_pct", 10.0),
+            sl_pct=self._cfg.get("sl_pct", 18.0),
             mfe_pct=extras.max_pnl_pct_seen if extras else 0.0,
+            mae_pct=extras.min_pnl_pct_seen if extras else 0.0,
             reason_for_entry=position.reason_for_entry,
             exit_layer=layer.value,
             reason_for_exit=reason,
@@ -786,6 +873,10 @@ class NiftyEngineV2:
             position.entry_price, exit_price, leg_pnl, pnl_pct, layer.value,
         )
 
+        # Instrumentation: track the exited option's path for N more candles.
+        if layer != N2ExitLayer.MANUAL_STOP:
+            self._register_post_exit_tracker(position, exit_price, reason, self._daily.trades_today)
+
         self._position_extras = None
         self._last_position_tick_at = None
 
@@ -798,6 +889,160 @@ class NiftyEngineV2:
             log_attempt_n2(**kw)
         except Exception:
             logger.debug("N2 attempt log failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Instrumentation: post-exit + shadow (blocked-signal) path tracking
+    # ------------------------------------------------------------------
+
+    def _fetch_ltp_symbol(self, tradingsymbol: str) -> float:
+        try:
+            sym = f"NFO:{tradingsymbol}"
+            data = self._kite.ltp([sym])
+            return data.get(sym, {}).get("last_price", 0) or 0.0
+        except Exception:
+            return 0.0
+
+    def _register_post_exit_tracker(self, position, exit_price: float,
+                                    reason: str, trade_number: int) -> None:
+        n = int(self._cfg.get("post_exit_track_candles", 8))
+        if n <= 0 or exit_price <= 0:
+            return
+        t = OptionPathTracker(
+            kind="POST_EXIT",
+            tradingsymbol=position.option_symbol,
+            option_type=position.option_type,
+            strike=position.strike,
+            ref_price=exit_price,
+            start_time=datetime.now(IST),
+            reason=reason,
+            max_ltp=exit_price, min_ltp=exit_price, last_ltp=exit_price,
+            candles_left=n,
+            trade_number=trade_number,
+            entry_price=position.entry_price,
+        )
+        with self._tracker_lock:
+            self._path_trackers.append(t)
+
+    def _register_shadow(self, base_signal: N2Signal, indicators: dict,
+                         now: datetime, block_reason: str) -> None:
+        cap = int(self._cfg.get("max_shadow_trackers", 6))
+        with self._tracker_lock:
+            if sum(1 for t in self._path_trackers if t.kind == "SHADOW") >= cap:
+                return
+        inst = self._ce_instrument if base_signal == N2Signal.BUY_CE else self._pe_instrument
+        if inst is None:
+            return
+        state = self._get_state()
+        ltp = state.ce_ltp if base_signal == N2Signal.BUY_CE else state.pe_ltp
+        if ltp <= 0:
+            ltp = self._fetch_ltp_symbol(inst["tradingsymbol"])
+        if ltp <= 0:
+            return
+        t = OptionPathTracker(
+            kind="SHADOW",
+            tradingsymbol=inst["tradingsymbol"],
+            option_type="CE" if base_signal == N2Signal.BUY_CE else "PE",
+            strike=int(inst["strike"]),
+            ref_price=ltp,
+            start_time=now,
+            reason=block_reason,
+            max_ltp=ltp, min_ltp=ltp, last_ltp=ltp,
+            until_force_exit=True,
+            signal=base_signal.value,
+            spot=state.nifty_spot,
+            vwap=indicators.get("vwap") or 0.0,
+            rsi14=indicators.get("rsi14") or 0.0,
+        )
+        with self._tracker_lock:
+            self._path_trackers.append(t)
+        logger.info("[N2 SHADOW] %s blocked (%s) — tracking would-be outcome from %.2f",
+                    base_signal.value, block_reason, ltp)
+
+    def _update_path_trackers(self, now: datetime) -> None:
+        with self._tracker_lock:
+            trackers = list(self._path_trackers)
+        if not trackers:
+            return
+        syms = list({f"NFO:{t.tradingsymbol}" for t in trackers})
+        quotes: dict = {}
+        try:
+            data = self._kite.ltp(syms)
+            for s, v in data.items():
+                quotes[s] = v.get("last_price", 0) or 0.0
+        except Exception as e:
+            logger.debug("N2 path-tracker LTP fetch failed: %s", e)
+            return
+
+        force_t = time(*self._cfg.get("force_exit_hhmm", (15, 20)))
+        done_ids: set = set()
+        for t in trackers:
+            ltp = quotes.get(f"NFO:{t.tradingsymbol}", 0.0)
+            if ltp and ltp > 0:
+                t.max_ltp = max(t.max_ltp, ltp)
+                t.min_ltp = min(t.min_ltp, ltp)
+                t.last_ltp = ltp
+            t.candles_done += 1
+            if t.kind == "POST_EXIT":
+                t.candles_left -= 1
+                if t.candles_left <= 0:
+                    self._finalize_post_exit(t)
+                    done_ids.add(id(t))
+            else:  # SHADOW
+                if now.time() >= force_t:
+                    self._finalize_shadow(t, now)
+                    done_ids.add(id(t))
+        if done_ids:
+            with self._tracker_lock:
+                self._path_trackers = [t for t in self._path_trackers if id(t) not in done_ids]
+
+    def _finalize_post_exit(self, t: OptionPathTracker) -> None:
+        try:
+            log_post_exit_n2(
+                trade_number=t.trade_number,
+                option_symbol=t.tradingsymbol,
+                option_type=t.option_type,
+                strike=t.strike,
+                exit_time=t.start_time,
+                exit_reason=t.reason,
+                entry_price=t.entry_price,
+                exit_price=t.ref_price,
+                candles_tracked=t.candles_done,
+                post_max_ltp=t.max_ltp,
+                post_min_ltp=t.min_ltp,
+            )
+        except Exception:
+            logger.debug("N2 post-exit finalize failed", exc_info=True)
+
+    def _finalize_shadow(self, t: OptionPathTracker, now: datetime) -> None:
+        try:
+            log_shadow_signal_n2(
+                signal_time=t.start_time,
+                signal=t.signal,
+                block_reason=t.reason,
+                option_symbol=t.tradingsymbol,
+                option_type=t.option_type,
+                strike=t.strike,
+                spot=t.spot, vwap=t.vwap, rsi14=t.rsi14,
+                wouldbe_entry_price=t.ref_price,
+                force_exit_time=now,
+                force_exit_ltp=t.last_ltp,
+                path_max_ltp=t.max_ltp,
+                path_min_ltp=t.min_ltp,
+            )
+        except Exception:
+            logger.debug("N2 shadow finalize failed", exc_info=True)
+
+    def _flush_path_trackers(self) -> None:
+        """Finalize any pending trackers (called on stop) so no data is lost."""
+        with self._tracker_lock:
+            trackers = list(self._path_trackers)
+            self._path_trackers = []
+        now = datetime.now(IST)
+        for t in trackers:
+            if t.kind == "POST_EXIT":
+                self._finalize_post_exit(t)
+            else:
+                self._finalize_shadow(t, now)
 
     # ------------------------------------------------------------------
     # Monitoring loop — tick-frequency exit checks + REST LTP fallback
