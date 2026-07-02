@@ -196,46 +196,94 @@
       <div class="strat-note">{{ status.position.reason_entry }}</div>
     </div>
 
-    <!-- ── PAPER TRADES LIST ── -->
+    <!-- ── PAPER TRADE LOG (full history, same layout as v1) ── -->
     <div class="card">
       <div class="card-header">
-        <div class="card-title">Paper Trades — Today</div>
-        <a class="btn s-btn" style="padding:5px 12px;font-size:11px;text-decoration:none" :href="downloadHref">⬇ Download CSV</a>
+        <div class="card-title">Paper Trade Log</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn s-btn" style="padding:5px 12px;font-size:11px" @click="fetchTrades">↻ Refresh</button>
+          <a class="btn s-btn" style="padding:5px 12px;font-size:11px;text-decoration:none" :href="downloadHref">⬇ CSV</a>
+        </div>
       </div>
-      <div v-if="!trades || trades.length === 0" class="strat-note">No paper trades yet.</div>
-      <table v-else class="trades-table">
-        <thead>
-          <tr>
-            <th>Time</th><th>Setup</th><th>Symbol</th><th>Side</th>
-            <th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>%</th>
-            <th>MFE</th><th>MAE</th><th>Exit</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(t, i) in todayTrades" :key="i" :class="parseFloat(t.pnl_rupees) >= 0 ? 'win' : 'loss'">
-            <td>{{ t.exit_time }}</td>
-            <td>{{ (t.model || '').startsWith('V1') ? 'Breakout' : (t.model || '—') }}</td>
-            <td>{{ t.option_symbol }}</td>
-            <td>{{ t.option_type }}</td>
-            <td>{{ t.entry_price }}</td>
-            <td>{{ t.exit_price }}</td>
-            <td>{{ t.qty }}</td>
-            <td>₹{{ t.pnl_rupees }}</td>
-            <td>{{ t.pnl_pct }}%</td>
-            <td>{{ t.mfe_pct }}%</td>
-            <td>{{ t.mae_pct }}%</td>
-            <td>{{ t.reason_for_exit || t.exit_layer }}</td>
-          </tr>
-        </tbody>
-      </table>
+
+      <div v-if="summary && summary.total_trades > 0" class="sum-grid">
+        <div class="stat">
+          <div class="lbl">Total Trades</div>
+          <div class="val b">{{ summary.total_trades }}</div>
+        </div>
+        <div class="stat">
+          <div class="lbl">Win Rate</div>
+          <div class="val g">{{ summary.win_rate_pct }}%</div>
+        </div>
+        <div class="stat">
+          <div class="lbl">Total P&amp;L</div>
+          <div class="val" :class="summary.total_pnl_rs >= 0 ? 'g' : 'r'">
+            {{ summary.total_pnl_rs >= 0 ? '+' : '' }}₹{{ summary.total_pnl_rs }}
+          </div>
+        </div>
+        <div class="stat">
+          <div class="lbl">Avg Win / Loss</div>
+          <div class="val" style="font-size:14px">₹{{ summary.avg_win_rs }} / ₹{{ summary.avg_loss_rs }}</div>
+        </div>
+      </div>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Date</th>
+              <th>Type</th>
+              <th>Symbol</th>
+              <th>Entry Time</th>
+              <th>Entry ₹</th>
+              <th>Exit Time</th>
+              <th>Exit ₹</th>
+              <th>P&amp;L ₹</th>
+              <th>P&amp;L %</th>
+              <th>MFE %</th>
+              <th>MAE %</th>
+              <th>Exit Reason</th>
+              <th>Entry Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-if="!trades.length">
+              <td colspan="14" class="empty-state">No paper trades yet. Start the engine to begin.</td>
+            </tr>
+            <tr v-for="(t, i) in [...trades].reverse()" :key="i">
+              <td style="color:var(--text-muted)">{{ t.trade_number }}</td>
+              <td>{{ t.date }}</td>
+              <td>
+                <span class="pill" :class="t.option_type === 'CE' ? 'pill-ce' : 'pill-pe'">{{ t.option_type }}</span>
+              </td>
+              <td style="color:var(--text-primary);font-weight:600;font-size:11px">{{ t.option_symbol }}</td>
+              <td>{{ t.entry_time }}</td>
+              <td style="color:var(--text-primary)">₹{{ t.entry_price }}</td>
+              <td>{{ t.exit_time }}</td>
+              <td style="color:var(--text-primary)">₹{{ t.exit_price }}</td>
+              <td>
+                <span class="pill" :class="parseFloat(t.pnl_rupees) >= 0 ? 'pill-win' : 'pill-loss'">
+                  {{ parseFloat(t.pnl_rupees) >= 0 ? '+' : '' }}₹{{ t.pnl_rupees }}
+                </span>
+              </td>
+              <td :style="{ color: parseFloat(t.pnl_pct) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight: 700 }">
+                {{ parseFloat(t.pnl_pct) >= 0 ? '+' : '' }}{{ t.pnl_pct }}%
+              </td>
+              <td style="color:var(--green)">{{ t.mfe_pct ?? '—' }}</td>
+              <td style="color:var(--red)">{{ t.mae_pct ?? '—' }}</td>
+              <td><span class="pill pill-exit">{{ t.exit_layer || t.reason_for_exit }}</span></td>
+              <td>
+                <span v-if="t.reason_for_entry" :title="t.reason_for_entry" style="cursor:help;color:var(--text-muted);font-size:11px">ℹ hover</span>
+                <span v-else style="color:var(--text-muted)">—</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
       <div v-if="summary && summary.total_trades > 0" class="status-row" style="margin-top:8px">
-        <span>Total: <b>{{ summary.total_trades }}</b></span>
-        <span class="sep">|</span>
         <span>Wins: <b style="color:var(--green)">{{ summary.wins }}</b> / Losses: <b style="color:var(--red)">{{ summary.losses }}</b></span>
-        <span class="sep">|</span>
-        <span>Hit-rate: <b>{{ summary.win_rate_pct }}%</b></span>
-        <span class="sep">|</span>
-        <span>Net: <b :style="{color: (summary.total_pnl_rs||0)>=0 ? 'var(--green)' : 'var(--red)'}">₹{{ summary.total_pnl_rs }}</b></span>
         <span class="sep">|</span>
         <span>PF: <b>{{ summary.profit_factor ?? '—' }}</b></span>
       </div>
@@ -301,12 +349,6 @@ const modelLabel = computed(() => {
   const m = status.position?.model || ''
   if (m.startsWith('V1')) return 'VWAP+EMA Breakout'
   return m || '—'
-})
-
-const todayTrades = computed(() => {
-  if (!trades.value || trades.value.length === 0) return []
-  const today = new Date().toISOString().slice(0, 10)
-  return trades.value.filter(t => t.date === today).slice().reverse()
 })
 
 const todayCandles = computed(() => candles.value.filter(c => c.is_today))
