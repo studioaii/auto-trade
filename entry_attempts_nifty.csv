@@ -6,3 +6,4 @@ date,time,signal,nifty_spot,atm_strike,option_ltp,vwap_distance_pct,rsi14,body_p
 2026-06-01,13:15,BUY_PE,23460.65,23450,107.6,-0.7059,29.07,81.67,TRENDING,Second entry blocked — first trade hit hard SL today,
 2026-06-18,12:30,BUY_CE,24118.7,24100,130.75,0.0727,70.41,100.0,TRENDING,Second entry blocked — first trade hit hard SL today,
 2026-06-18,13:35,BUY_CE,24123.75,24100,133.65,0.0694,67.27,75.23,TRENDING,Second entry blocked — first trade hit hard SL today,
+2026-07-08,13:50,BUY_PE,24119.65,24100,207.0,-0.5735,23.48,74.98,TRENDING,Second entry blocked — first trade hit hard SL today,
